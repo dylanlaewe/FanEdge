@@ -9,6 +9,9 @@ FanEdge is an AI-powered fantasy football strategist for real Sleeper leagues. E
 - Imports the user's real roster and separates starters from bench players
 - Maps Sleeper player IDs to names, positions, and NFL teams
 - Produces three AI strategy cards: **Start/Sit**, **Roster Move**, and **Risk Watch**
+- Detects the current NFL week from Sleeper and maps rostered teams to the weekly schedule
+- Shows verified opponent, home/away, kickoff, and Sleeper injury status when available
+- Calculates recent and season fantasy averages from completed nflverse game data when league scoring is fully supported
 - Handles missing users, leagues, rosters, player metadata, API failures, and missing AI configuration
 - Caches read-heavy Sleeper data for a responsive experience
 
@@ -27,12 +30,13 @@ flowchart LR
 - `app.py` owns the Streamlit UI, caching, and session state.
 - `sleeper_api.py` provides defensive HTTP access and converts Sleeper IDs into display-ready roster objects.
 - `strategy_engine.py` creates a factual roster context, calls OpenAI, and parses the required recommendations.
+- `football_data.py` normalizes Sleeper state/status plus nflverse schedule and completed-game statistics into provider-neutral weekly context.
 
 No database or authentication is used in this MVP.
 
 ## Tech stack
 
-Python 3.11+, Streamlit, Requests, OpenAI Python SDK, and python-dotenv.
+Python 3.11+, Streamlit, Requests, OpenAI Python SDK, python-dotenv, Sleeper's public API, and nflverse release data.
 
 ## Run locally
 
@@ -74,14 +78,18 @@ The Sleeper roster experience still works without an OpenAI key; only strategy g
 ## Current limitations
 
 - Supports Sleeper NFL leagues only and has no user accounts or saved history.
-- Uses roster and league metadata, not live injuries, news, projections, matchups, waiver availability, or trade values.
-- Advice quality is constrained accordingly; the model is explicitly told not to invent unavailable facts.
+- Weekly opponent and kickoff data come from nflverse; injury designations come from Sleeper player metadata rather than a real-time official injury feed.
+- Injury designations come from Sleeper player metadata and may lag official club reporting.
+- nflverse schedule/stat releases are public, no-auth data, but player performance currently uses a strict normalized name/team/position match because Sleeper does not expose nflverse's GSIS identifier reliably.
+- Custom offensive scoring bonuses or unsupported scoring keys disable performance averages rather than showing inaccurate points.
+- No projections, waiver availability, trade values, or news are supplied. The model is explicitly told not to invent unavailable facts.
 - The current season is selected automatically. Historical-season selection is not yet exposed.
 - League co-owners are not currently resolved as roster owners.
 
 ## Roadmap
 
-- Add trustworthy injury, matchup, projection, and schedule context
+- Harden player identity mapping with a maintained cross-provider identifier table
+- Add trustworthy projections and deeper usage signals
 - Add waiver-wire and free-agent recommendations
 - Support weekly lineup slots and player-level projections
 - Add saved teams, recommendation history, and outcome tracking

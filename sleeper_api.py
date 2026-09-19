@@ -73,6 +73,12 @@ class SleeperClient:
             raise SleeperAPIError("Sleeper returned malformed player data.")
         return {str(key): value for key, value in data.items() if isinstance(value, dict)}
 
+    def get_nfl_state(self) -> dict[str, Any]:
+        data = self._get("/state/nfl")
+        if not isinstance(data, dict):
+            raise SleeperAPIError("Sleeper could not provide the current NFL week.")
+        return data
+
 
 def find_user_roster(rosters: list[dict[str, Any]], user_id: str) -> dict[str, Any]:
     """Find a user's roster while tolerating numeric/string owner IDs."""

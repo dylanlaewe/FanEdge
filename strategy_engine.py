@@ -10,10 +10,13 @@ from typing import Any
 
 from openai import OpenAI
 
+from football_data import NFLState, PlayerWeeklyContext
 from sleeper_api import Roster
 
 
-SYSTEM_PROMPT = """You are FanEdge, an expert fantasy football strategist. Analyze the supplied fantasy roster and league context. Be decisive, concise, and data-aware. Never invent statistics, injuries, matchups, or news that were not supplied in the context.
+SYSTEM_PROMPT = """You are FanEdge, an expert fantasy football strategist. Analyze the supplied fantasy roster, league, and weekly context. Be decisive, concise, and data-aware.
+
+Use ONLY the factual sports information supplied in the context. Never invent injuries, projections, opponents, statistics, matchups, or news. Missing or null data means unknown, not healthy, inactive, zero, or a bye. Prioritize real lineup decisions supported by the supplied facts.
 
 Return EXACTLY 3 actionable recommendations:
 1. START/SIT — identify the most important lineup decision.
@@ -27,10 +30,26 @@ Keep the complete response under 170 words."""
 LABELS = ("START/SIT", "ROSTER MOVE", "RISK WATCH")
 
 
-def build_roster_context(roster: Roster, league: dict[str, Any]) -> dict[str, Any]:
+def build_roster_context(
+    roster: Roster,
+    league: dict[str, Any],
+    nfl_state: NFLState | None = None,
+    weekly_contexts: dict[str, PlayerWeeklyContext] | None = None,
+) -> dict[str, Any]:
     """Create a serializable context containing only data we actually know."""
     settings = league.get("settings") if isinstance(league.get("settings"), dict) else {}
     scoring = league.get("scoring_settings") if isinstance(league.get("scoring_settings"), dict) else {}
+    weekly_contexts = weekly_contexts or {}
+
+    def player_context(player: Any) -> dict[str, Any]:
+        base = asdict(player)
+        weekly = weekly_contexts.get(player.player_id)
+        if weekly:
+            base["weekly"] = weekly.to_dict()
+        else:
+            base["weekly"] = None
+        return base
+
     return {
         "league": {
             "name": league.get("name") or "Unnamed league",
@@ -38,9 +57,10 @@ def build_roster_context(roster: Roster, league: dict[str, Any]) -> dict[str, An
             "season": league.get("season"),
             "scoring_settings": scoring,
         },
-        "starters": [asdict(player) for player in roster.starters],
-        "bench": [asdict(player) for player in roster.bench],
-        "data_limits": "No live injury, matchup, projection, waiver, or news data is supplied.",
+        "nfl_state": asdict(nfl_state) if nfl_state else None,
+        "starters": [player_context(player) for player in roster.starters],
+        "bench": [player_context(player) for player in roster.bench],
+        "data_limits": "Null fields are unknown. No projections, waiver availability, or news is supplied.",
     }
 
 
@@ -68,6 +88,8 @@ def generate_strategy(
     roster: Roster,
     league: dict[str, Any],
     *,
+    nfl_state: NFLState | None = None,
+    weekly_contexts: dict[str, PlayerWeeklyContext] | None = None,
     api_key: str | None = None,
     model: str = "gpt-4o-mini",
 ) -> list[dict[str, str]]:
@@ -76,7 +98,7 @@ def generate_strategy(
     if not key:
         raise ValueError("OPENAI_API_KEY is not configured.")
 
-    context = build_roster_context(roster, league)
+    context = build_roster_context(roster, league, nfl_state, weekly_contexts)
     client = OpenAI(api_key=key)
     response = client.responses.create(
         model=model,
