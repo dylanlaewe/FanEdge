@@ -7,6 +7,7 @@ import gzip
 import io
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
@@ -14,6 +15,7 @@ import requests
 
 from sleeper_api import Player, Roster
 from player_identity import PlayerIdentity, normalize_name
+from team_identity import NFL_TEAMS, normalize_team_id
 
 
 SCHEDULE_URL = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv"
@@ -55,6 +57,38 @@ class WeeklyGame:
     kickoff: datetime | None
 
 
+class ScheduleStatus(StrEnum):
+    SCHEDULED = "SCHEDULED"
+    BYE = "BYE"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class WeeklySchedule:
+    games: dict[str, WeeklyGame]
+    complete: bool
+    issues: tuple[str, ...] = ()
+
+    def get(self, team: str, default: Any = None) -> WeeklyGame | Any:
+        canonical = normalize_team_id("sleeper", team)
+        return self.games.get(canonical, default) if canonical else default
+
+    def __getitem__(self, team: str) -> WeeklyGame:
+        canonical = normalize_team_id("sleeper", team)
+        if not canonical:
+            raise KeyError(team)
+        return self.games[canonical]
+
+    def status_for(self, team: str) -> ScheduleStatus:
+        canonical = normalize_team_id("sleeper", team)
+        if not canonical or not self.complete:
+            return ScheduleStatus.UNKNOWN
+        return ScheduleStatus.SCHEDULED if canonical in self.games else ScheduleStatus.BYE
+
+    def __bool__(self) -> bool:
+        return bool(self.games)
+
+
 @dataclass(frozen=True)
 class GamePerformance:
     week: int
@@ -83,6 +117,7 @@ class PlayerWeeklyContext:
     injury_body_part: str | None
     recent_stats: tuple[GamePerformance, ...]
     season_stats: PerformanceSummary | None
+    schedule_status: str = ScheduleStatus.UNKNOWN.value
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -144,8 +179,10 @@ def _kickoff(row: dict[str, str]) -> datetime | None:
         return None
 
 
-def build_weekly_schedule(rows: Iterable[dict[str, str]], state: NFLState) -> dict[str, WeeklyGame]:
+def build_weekly_schedule(rows: Iterable[dict[str, str]], state: NFLState) -> WeeklySchedule:
     games: dict[str, WeeklyGame] = {}
+    issues: list[str] = []
+    matched_rows = 0
     expected_type = SEASON_TYPES[state.season_type]
     for row in rows:
         if not isinstance(row, dict):
@@ -156,13 +193,30 @@ def build_weekly_schedule(rows: Iterable[dict[str, str]], state: NFLState) -> di
             continue
         if not matches or row.get("game_type") != expected_type:
             continue
-        away, home = row.get("away_team"), row.get("home_team")
+        matched_rows += 1
+        away = normalize_team_id("nflverse", row.get("away_team"))
+        home = normalize_team_id("nflverse", row.get("home_team"))
         if not away or not home:
+            issues.append("unrecognized team identity")
+            continue
+        if away == home or away in games or home in games:
+            issues.append("duplicate or impossible team assignment")
             continue
         kickoff = _kickoff(row)
         games[away] = WeeklyGame(away, home, False, kickoff)
         games[home] = WeeklyGame(home, away, True, kickoff)
-    return games
+    game_count = len(games) // 2
+    represented = set(games)
+    complete = (
+        matched_rows == game_count
+        and 12 <= game_count <= 16
+        and len(games) % 2 == 0
+        and represented <= NFL_TEAMS
+        and not issues
+    )
+    if not complete and not issues:
+        issues.append("weekly schedule is incomplete")
+    return WeeklySchedule(games, complete, tuple(issues))
 
 
 def normalize_player_status(metadata: dict[str, Any] | None) -> tuple[str | None, str | None]:
@@ -252,15 +306,15 @@ def summarize_performance(games: Iterable[GamePerformance]) -> PerformanceSummar
 def build_player_weekly_contexts(
     roster: Roster,
     metadata: dict[str, dict[str, Any]],
-    schedule: dict[str, WeeklyGame],
+    schedule: WeeklySchedule | dict[str, WeeklyGame],
     performances: dict[Any, list[GamePerformance]],
     *,
-    schedule_verified: bool = True,
     identities: dict[str, PlayerIdentity] | None = None,
 ) -> dict[str, PlayerWeeklyContext]:
     contexts: dict[str, PlayerWeeklyContext] = {}
     for player in (*roster.starters, *roster.bench):
         game = schedule.get(player.team)
+        schedule_status = schedule.status_for(player.team) if isinstance(schedule, WeeklySchedule) else (ScheduleStatus.SCHEDULED if game else ScheduleStatus.UNKNOWN)
         player_metadata = metadata.get(player.player_id)
         status, body_part = normalize_player_status(player_metadata)
         identity = (identities or {}).get(player.player_id)
@@ -277,10 +331,11 @@ def build_player_weekly_contexts(
             opponent=game.opponent if game else None,
             home_away="home" if game and game.is_home else "away" if game else None,
             kickoff=game.kickoff if game else None,
-            is_bye=bool(schedule_verified and not game),
+            is_bye=schedule_status == ScheduleStatus.BYE,
             status=status,
             injury_body_part=body_part,
             recent_stats=games[-3:],
             season_stats=summarize_performance(games),
+            schedule_status=schedule_status.value,
         )
     return contexts

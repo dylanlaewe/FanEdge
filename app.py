@@ -15,12 +15,14 @@ from football_data import (
     NFLState,
     NflverseClient,
     PlayerWeeklyContext,
+    WeeklySchedule,
     build_performance_index,
     build_player_weekly_contexts,
     build_weekly_schedule,
     normalize_nfl_state,
 )
 from lineup_optimizer import LineupDecision, build_current_lineup, optimize_lineup
+from matchup import DefenseVsPosition, build_defense_vs_position
 from opportunity import PlayerOpportunity, build_opportunity_index, build_player_opportunities
 from sleeper_api import Roster, SleeperAPIError, SleeperClient, build_roster, find_user_roster
 from player_identity import PlayerIdentity, PlayerIdentityResolver
@@ -101,14 +103,18 @@ def cached_nfl_state() -> NFLState:
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
-def cached_weekly_schedule(state: NFLState) -> dict[str, Any]:
+def cached_weekly_schedule(state: NFLState) -> WeeklySchedule:
     return build_weekly_schedule(NflverseClient().get_schedule_rows(), state)
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
-def cached_weekly_indexes(state: NFLState, scoring: dict[str, Any]) -> tuple[dict[Any, Any], dict[Any, Any]]:
+def cached_weekly_indexes(state: NFLState, scoring: dict[str, Any]) -> tuple[dict[Any, Any], dict[Any, Any], dict[tuple[str, str], DefenseVsPosition]]:
     rows = NflverseClient().get_stat_rows(state.season)
-    return build_performance_index(rows, state, scoring), build_opportunity_index(rows, state)
+    return (
+        build_performance_index(rows, state, scoring),
+        build_opportunity_index(rows, state),
+        build_defense_vs_position(rows, state, scoring),
+    )
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -224,6 +230,15 @@ def render_lineup_check(decisions: list[LineupDecision], health: Any) -> None:
             f'<strong>{escape(starter_name)}</strong> in {escape(decision.slot_id)}</div>'
             f'<div class="fe-waiver-meta">{escape(reasons)}</div></article>'
         )
+        with st.expander(f"Why this move · {decision.challenger.name}"):
+            st.caption(f"Evidence confidence: {decision.confidence} — not an outcome probability.")
+            if decision.evidence:
+                st.caption(f"Reason codes: {', '.join(decision.reason_codes)}")
+                for item in decision.evidence:
+                    st.markdown(f"**{item.label}**  \n{item.factual_value} {item.comparison}")
+                    st.caption(f"Source: {item.source_type}")
+            else:
+                st.caption("No additional structured evidence is available.")
 
 
 def reset_team() -> None:
@@ -311,18 +326,17 @@ else:
     if roster:
         metadata = cached_players()
         league_rosters = cached_rosters(selected_id)
-        schedule_verified = False
-        schedule: dict[str, Any] = {}
+        schedule: WeeklySchedule | dict[str, Any] = WeeklySchedule({}, False, ("schedule unavailable",))
         performances: dict[Any, Any] = {}
         opportunity_index: dict[Any, Any] = {}
+        matchup_index: dict[tuple[str, str], DefenseVsPosition] = {}
         if nfl_state:
             try:
                 schedule = cached_weekly_schedule(nfl_state)
-                schedule_verified = bool(schedule)
             except FootballDataError:
                 pass
             try:
-                performances, opportunity_index = cached_weekly_indexes(nfl_state, league.get("scoring_settings") or {})
+                performances, opportunity_index, matchup_index = cached_weekly_indexes(nfl_state, league.get("scoring_settings") or {})
             except FootballDataError:
                 pass
         try:
@@ -334,7 +348,6 @@ else:
             metadata,
             schedule,
             performances,
-            schedule_verified=schedule_verified,
             identities=identities,
         )
         opportunities = build_player_opportunities(
@@ -350,7 +363,14 @@ else:
         lineup_slots = build_current_lineup(
             st.session_state.raw_roster, metadata, league.get("roster_positions") or []
         )
-        lineup_decisions, lineup_health = optimize_lineup(lineup_slots, roster, weekly_contexts, opportunities)
+        lineup_decisions, lineup_health = optimize_lineup(
+            lineup_slots,
+            roster,
+            weekly_contexts,
+            opportunities,
+            matchup_index,
+            {player_id: bool(identity.gsis_id) for player_id, identity in identities.items()},
+        )
         render_lineup_check(lineup_decisions, lineup_health)
         has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
         if lineup_decisions and st.button("EXPLAIN LINEUP DECISIONS  →", width="stretch", disabled=not has_openai_key, key="lineup_button"):
@@ -371,7 +391,6 @@ else:
             metadata,
             schedule,
             performances,
-            schedule_verified=schedule_verified,
             identities=identities,
         )
         roster_needs = analyze_roster_needs(roster, weekly_contexts)

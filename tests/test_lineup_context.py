@@ -14,3 +14,5 @@ def test_ai_serializes_only_deterministic_decisions_without_claims():
     assert payload["deterministic_decisions"][0]["challenger"]["player_id"] == "b"
     assert "projection" in payload["data_limits"].lower()
     assert "unlisted-player" not in str(payload)
+    assert "depth-chart" in payload["data_limits"].lower()
+    assert "matchup" not in str(payload["deterministic_decisions"][0]).lower()

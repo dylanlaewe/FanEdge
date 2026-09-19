@@ -35,7 +35,7 @@ WAIVER_LABELS = ("TOP ADD", "ADD/DROP", "WATCHLIST")
 WAIVER_SYSTEM_PROMPT = """You are FanEdge's waiver analyst. Use ONLY the supplied JSON facts. Sleeper ownership is authoritative: discuss only the candidates provided. Never invent availability, statistics, projections, injuries, matchups, or news. Treat drop candidates as cautious options, not commands.
 
 Return EXACTLY 3 concise recommendations labeled TOP ADD, ADD/DROP, and WATCHLIST. Explain the factual tradeoff behind each. If a drop is not justified, say so. Keep the complete response under 170 words."""
-LINEUP_SYSTEM_PROMPT = """You are FanEdge's lineup analyst. Explain ONLY the deterministic lineup decisions supplied in JSON. Never invent projections, statistics, injuries, matchup strength, news, weather, or depth-chart changes. Opponents are context, not a difficulty rating. Do not introduce players or swaps absent from the supplied decisions.
+LINEUP_SYSTEM_PROMPT = """You are FanEdge's lineup analyst. Explain ONLY the deterministic lineup decisions and evidence supplied in JSON. Never invent projections, statistics, injuries, matchup strength, news, weather, teammate injuries, snap counts, routes, or depth-chart changes. A matchup claim is allowed only when a MATCHUP evidence item exists. Do not introduce players, swaps, reasons, or role changes absent from the supplied decisions.
 
 Return concise prose under 170 words. Preserve each deterministic decision label and explain the supplied factual reasons. If no decisions are supplied, say the current lineup has no material evidence-backed challenge."""
 
@@ -162,7 +162,7 @@ def build_lineup_context(
             for slot in slots
         ],
         "deterministic_decisions": [decision.to_dict(weekly_contexts, opportunities) for decision in decisions],
-        "data_limits": "No projections, matchup rankings, news, weather, or defensive strength are supplied.",
+        "data_limits": "Only evidence arrays support factual claims. No projections, news, weather, teammate injuries, snap counts, routes, or depth-chart changes are supplied.",
     }
 
 

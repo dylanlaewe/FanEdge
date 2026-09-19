@@ -105,3 +105,31 @@ def test_global_assignment_beats_greedy_flex_conflict():
     }
     decisions, _ = optimize_lineup(slots, Roster([flex_starter, rb_starter], [rb_bench, wr_bench]), contexts, {})
     assert {(d.slot_type, d.challenger.player_id) for d in decisions} == {("FLEX", "bw"), ("RB", "br")}
+
+
+def test_reason_codes_are_backed_by_factual_evidence_only():
+    starter, bench = Player("s", "Starter", "WR", "A"), Player("b", "Bench", "WR", "B")
+    slots = build_current_lineup({"starters": ["s"]}, {"s": {"full_name": "Starter", "position": "WR", "team": "A"}}, ["WR"])
+    contexts = {"s": weekly(starter, 5), "b": weekly(bench, 15)}
+    decisions, _ = optimize_lineup(slots, Roster([starter], [bench]), contexts, {})
+    decision = decisions[0]
+    assert "HIGHER_RECENT_PRODUCTION" in decision.reason_codes
+    assert "HIGHER_SEASON_PRODUCTION" in decision.reason_codes
+    assert all(item.source_type for item in decision.evidence)
+    assert "FAVORABLE_MATCHUP" not in decision.reason_codes
+    assert not any(item.category in {"MATCHUP", "ROLE"} for item in decision.evidence)
+
+
+def test_confidence_falls_when_evidence_is_weak():
+    starter, bench = Player("s", "Starter", "RB", "A"), Player("b", "Bench", "RB", "B")
+    slots = build_current_lineup({"starters": ["s"]}, {"s": {"full_name": "Starter", "position": "RB", "team": "A"}}, ["RB"])
+    contexts = {"s": weekly(starter, 2, games=1), "b": weekly(bench, 15, games=1)}
+    weak = optimize_lineup(slots, Roster([starter], [bench]), contexts, {})[0][0]
+    strong = optimize_lineup(
+        slots, Roster([starter], [bench]),
+        {"s": weekly(starter, 2), "b": weekly(bench, 15)},
+        {"s": usage(position="RB"), "b": usage(position="RB")},
+        identity_resolved={"s": True, "b": True},
+    )[0][0]
+    assert weak.confidence == "MODERATE"
+    assert strong.confidence == "HIGH"

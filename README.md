@@ -43,6 +43,14 @@ flowchart LR
 - `waiver_engine.py` owns league-wide exclusion, roster-needs analysis, transparent candidate scoring, and conservative drop-candidate generation.
 - `opportunity.py` derives position-aware completed-game usage summaries from nflverse weekly statistics.
 - `lineup_optimizer.py` normalizes Sleeper lineup slots and solves a deterministic one-to-one starter/bench assignment.
+- `team_identity.py` maps explicit provider aliases to one of 32 canonical current NFL team IDs.
+- `matchup.py` calculates completed-game fantasy points allowed by defense and offensive position under the selected league's scoring.
+
+## Schedule integrity
+
+Schedule context has three explicit states: `SCHEDULED`, `BYE`, and `UNKNOWN`. Missing a game is never sufficient evidence for a bye. nflverse and Sleeper team IDs are normalized through a centralized, deterministic alias table—for example, nflverse `LA` becomes canonical `LAR`.
+
+Before FanEdge infers a bye, the target weekly schedule must contain 12–16 valid games, an even set of known canonical teams, no duplicated team assignments, no impossible self-matchups, and no malformed team identities. A failed fetch, truncated week, malformed row, or unknown player team yields `UNKNOWN`, which carries no optimizer bye penalty.
 
 ## Waiver ranking
 
@@ -57,6 +65,12 @@ FanEdge reads the league's real `roster_positions` rather than assuming a standa
 The comparison signal combines completed-game fantasy production, position-aware opportunity volume, sample size, usage trend, injury status, and verified byes. It is not a projection and does not apply an unsupported matchup-strength adjustment. Differences under 2 points retain the current starter automatically; 2–3.99 is a close call, 4–7.99 is consider swap, and 8+ is strong swap. Close calls require at least two games for both players. Out/IR/PUP and verified-bye starters receive a safety penalty only when a healthy, eligible replacement exists. A dynamic-programming assignment maximizes the total evidence-backed improvement while ensuring one bench player fills at most one slot.
 
 Usage trend requires four completed games. It compares the most recent two-game position-specific workload average with the preceding-game average using a threshold of the larger of 1.5 opportunities or 20%. One-game starts remain `INSUFFICIENT DATA`. The current nflverse weekly dataset reliably supplies QB attempts/completions/rushes, RB carries/targets/receptions, and WR/TE targets/receptions. Broad snap share and route participation are intentionally omitted because they are not consistently present in that source.
+
+Every lineup decision now retains structured evidence, deterministic reason codes, and provenance. Evidence confidence is `LOW`, `MODERATE`, or `HIGH`, based on performance/usage coverage, sample size, identity resolution, decision magnitude, and verified injury/bye evidence. It is not an outcome probability. One-game evidence is capped at moderate confidence.
+
+Matchup labels use completed games only. FanEdge aggregates league-scored points conceded by defense, position, and week, then compares each defense's per-game value with the league-wide defense-game average for that position. Four games are required: at least 15% above league average is `FAVORABLE`, at least 15% below is `DIFFICULT`, and the rest is `NEUTRAL`; smaller samples are `INSUFFICIENT DATA` and do not affect recommendations.
+
+nflverse publishes weekly depth charts, injuries, snap counts, and play participation, but these sources have different refresh schedules, identity requirements, and—in the case of depth charts—a recently changed schema. M4.1 does not infer teammate-driven role changes from them. A future role layer should normalize those datasets separately, validate current-season completeness, and require an explicit teammate availability-to-opportunity relationship before producing role evidence.
 
 No database or authentication is used in this MVP.
 

@@ -7,6 +7,8 @@ from football_data import (
     FootballDataError,
     GamePerformance,
     NFLState,
+    ScheduleStatus,
+    WeeklySchedule,
     WeeklyGame,
     build_performance_index,
     build_player_weekly_contexts,
@@ -42,7 +44,8 @@ def test_schedule_maps_home_away_and_kickoff() -> None:
 
 
 def test_schedule_skips_malformed_rows() -> None:
-    assert build_weekly_schedule([{}, {"season": "bad"}], NFLState(2026, 2, "regular")) == {}
+    schedule = build_weekly_schedule([{}, {"season": "bad"}], NFLState(2026, 2, "regular"))
+    assert schedule.games == {} and not schedule.complete
 
 
 def test_status_and_missing_status() -> None:
@@ -88,10 +91,12 @@ def test_performance_index_excludes_current_week_and_handles_bad_rows() -> None:
 def test_context_missing_game_vs_verified_bye() -> None:
     player = Player("1", "Test Player", "RB", "BUF")
     roster = Roster([player], [])
-    missing = build_player_weekly_contexts(roster, {}, {}, {}, schedule_verified=False)["1"]
-    bye = build_player_weekly_contexts(roster, {}, {}, {}, schedule_verified=True)["1"]
+    missing = build_player_weekly_contexts(roster, {}, {}, {})["1"]
+    bye = build_player_weekly_contexts(roster, {}, WeeklySchedule({}, True), {})["1"]
     assert missing.opponent is None and missing.is_bye is False
     assert bye.opponent is None and bye.is_bye is True
+    assert missing.schedule_status == ScheduleStatus.UNKNOWN.value
+    assert bye.schedule_status == ScheduleStatus.BYE.value
 
 
 def test_context_with_game_and_unknown_stats() -> None:
