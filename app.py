@@ -21,7 +21,16 @@ from football_data import (
     normalize_nfl_state,
 )
 from sleeper_api import Roster, SleeperAPIError, SleeperClient, build_roster, find_user_roster
-from strategy_engine import generate_strategy
+from player_identity import PlayerIdentity, PlayerIdentityResolver
+from strategy_engine import generate_strategy, generate_waiver_advice
+from waiver_engine import (
+    WaiverCandidate,
+    analyze_roster_needs,
+    build_available_players,
+    build_rostered_player_ids,
+    find_drop_candidates,
+    rank_waiver_candidates,
+)
 
 load_dotenv()
 st.set_page_config(page_title="FanEdge — AI Fantasy Strategist", page_icon="🏈", layout="wide")
@@ -50,6 +59,7 @@ div[data-testid="stForm"]{max-width:620px;margin:-1rem auto 0;padding:.55rem 1.8
 .fe-connected{margin-top:1.7rem;padding:1.35rem 1.5rem 1.2rem;background:linear-gradient(145deg,#141a22,#10151b);border:1px solid var(--border);border-radius:var(--radius)}.fe-connected:has(.fe-league-select-label){padding-bottom:5rem}.fe-context h1{margin:.4rem 0 .45rem;font-size:clamp(2rem,4vw,3rem);line-height:1;letter-spacing:-.05em}.fe-meta{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem}.fe-meta span{color:#d6dce3}.fe-meta .dot{color:#505b69}.fe-league-select-label{color:var(--muted);font-size:.65rem;font-weight:800;letter-spacing:.12em;margin:1rem 0 .3rem}.stSelectbox{max-width:420px;margin:-4.35rem 0 1rem 1.5rem}
 .fe-roster-title{display:flex;align-items:end;justify-content:space-between;margin:2rem 0 .55rem;padding-bottom:.85rem;border-bottom:1px solid var(--border)}.fe-roster-title h2{margin:.35rem 0 0;font-size:1.75rem;letter-spacing:-.035em}.fe-section-header{display:flex;align-items:center;justify-content:space-between;margin:1.5rem 0 .7rem}.fe-section-header h3{margin:0;font-size:.72rem;letter-spacing:.13em;text-transform:uppercase}.fe-count{color:var(--muted);font-size:.68rem;font-weight:750;letter-spacing:.1em}
 .fe-roster-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.72rem}.fe-player-card{box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;min-width:0;min-height:106px;padding:.9rem 1rem;background:var(--surface);border:1px solid var(--border);border-radius:11px;transition:border-color .15s ease,transform .15s ease,background .15s ease}.fe-player-card:hover{transform:translateY(-1px);border-color:var(--bright);background:var(--raised)}.fe-player-card.starter{border-top-color:rgba(182,242,58,.55)}.fe-player-top{display:flex;align-items:center;gap:.6rem;min-width:0;line-height:1.15}.fe-position{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 34px;height:24px;border-radius:6px;background:rgba(182,242,58,.1);color:var(--lime);font-size:.63rem;font-weight:850;text-align:center}.fe-player-name{overflow:hidden;font-size:.93rem;font-weight:750;white-space:nowrap;text-overflow:ellipsis}.fe-player-meta{margin:.45rem 0 0 2.95rem;color:var(--muted);font-size:.7rem;line-height:1}.fe-player-detail{display:flex;align-items:center;flex-wrap:wrap;gap:.38rem .55rem;margin:.55rem 0 0 2.95rem;color:#b7c0ca;font-size:.64rem;line-height:1}.fe-status{color:#ffc66d;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.fe-performance{color:#d5dce4}.fe-performance span{color:var(--lime)}
+.fe-waiver{margin-top:2.8rem;padding-top:1.6rem;border-top:1px solid var(--border)}.fe-waiver-head{display:flex;justify-content:space-between;align-items:end;margin-bottom:1rem}.fe-waiver-head h2{margin:.35rem 0 0;font-size:1.8rem;letter-spacing:-.04em}.fe-waiver-head p{margin:.3rem 0 0;color:var(--muted);font-size:.82rem}.fe-waiver-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.7rem}.fe-waiver-card{padding:1rem 1.1rem;background:var(--surface);border:1px solid var(--border);border-radius:11px}.fe-waiver-main{display:flex;align-items:center;gap:.65rem}.fe-waiver-name{font-weight:800}.fe-waiver-meta{margin:.45rem 0;color:var(--muted);font-size:.7rem}.fe-waiver-stats{color:#ccd4dd;font-size:.7rem}.fe-waiver-stats strong{color:var(--lime)}.fe-reasons{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.65rem}.fe-reason{padding:.2rem .42rem;border:1px solid #34404c;border-radius:999px;color:#aeb8c4;font-size:.58rem;font-weight:750}.fe-waiver-note{margin-top:.7rem;color:var(--muted);font-size:.7rem}
 .fe-ai-panel{box-sizing:border-box;max-width:920px;margin:2.5rem auto 0;padding:1.8rem 2rem;overflow:hidden;position:relative;background:linear-gradient(135deg,#171e26,#10151b 72%);border:1px solid #303b47;border-radius:var(--radius)}.fe-ai-panel:after{content:"";position:absolute;width:210px;height:210px;right:-95px;top:-120px;border-radius:50%;background:rgba(182,242,58,.07)}.fe-ai-copy{max-width:470px}.fe-ai-panel h2{margin:.5rem 0 .35rem;font-size:1.55rem;letter-spacing:-.035em}.fe-ai-panel p{margin:0;color:var(--muted);font-size:.86rem;line-height:1.5}.st-key-strategy_button{margin-top:-3.85rem;margin-right:calc((100% - 920px)/2 + 2rem);margin-left:auto;width:285px}.fe-ai-unavailable{box-sizing:border-box;max-width:920px;margin:.8rem auto 0;padding:.75rem .95rem;background:rgba(139,149,165,.06);border:1px solid var(--border);border-radius:9px;color:var(--muted);font-size:.75rem}.fe-ai-unavailable strong{display:block;margin-bottom:.15rem;color:#c6ced7;font-size:.64rem;letter-spacing:.11em}
 .fe-results-header{margin:3.6rem 0 1rem}.fe-results-header h2{margin:.4rem 0 0;font-size:2rem;letter-spacing:-.04em}.fe-strategy-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.85rem}.fe-strategy-card{min-height:190px;padding:1.35rem;background:var(--surface);border:1px solid var(--border);border-radius:12px}.fe-strategy-card:first-child{border-top-color:var(--lime)}.fe-strategy-label{color:var(--lime);font-size:.67rem;font-weight:850;letter-spacing:.12em}.fe-strategy-card p{margin:1rem 0 0;color:#dce2e9;font-size:.9rem;line-height:1.65}
 [data-testid="stAlert"]{border-radius:10px;font-size:.85rem}[data-testid="stSpinner"]{color:var(--muted)}
@@ -95,6 +105,11 @@ def cached_weekly_schedule(state: NFLState) -> dict[str, Any]:
 @st.cache_data(ttl=21600, show_spinner=False)
 def cached_performances(state: NFLState, scoring: dict[str, Any]) -> dict[Any, Any]:
     return build_performance_index(NflverseClient().get_stat_rows(state.season), state, scoring)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def cached_identities(players: dict[str, dict[str, Any]]) -> dict[str, PlayerIdentity]:
+    return PlayerIdentityResolver(NflverseClient().get_player_rows()).resolve_all(players)
 
 
 def scoring_label(league: dict[str, Any]) -> str:
@@ -158,8 +173,30 @@ def render_player_grid(
     st.html(f'<div class="fe-roster-grid">{cards}</div>')
 
 
+def render_waiver_candidate(candidate: WaiverCandidate) -> str:
+    context = candidate.context
+    marker = "vs" if context.home_away == "home" else "@"
+    matchup = f"{candidate.player.team} · {marker} {context.opponent}" if context.opponent else candidate.player.team
+    summary = context.season_stats
+    stats = ""
+    if summary:
+        arrow = {"up": "↑", "down": "↓", "steady": "→"}.get(summary.trend, "")
+        stats = (
+            f'<div class="fe-waiver-stats">SEASON <strong>{summary.season_average:.1f}</strong> &nbsp; '
+            f'LAST {min(3, summary.games_played)} <strong>{summary.recent_average:.1f}</strong> &nbsp; {arrow}</div>'
+        )
+    reasons = "".join(f'<span class="fe-reason">{escape(reason)}</span>' for reason in candidate.reasons)
+    return (
+        '<article class="fe-waiver-card"><div class="fe-waiver-main">'
+        f'<span class="fe-position">{escape(candidate.player.position)}</span>'
+        f'<span class="fe-waiver-name">{escape(candidate.player.name)}</span></div>'
+        f'<div class="fe-waiver-meta">{escape(matchup)}</div>{stats}'
+        f'<div class="fe-reasons">{reasons}</div></article>'
+    )
+
+
 def reset_team() -> None:
-    for key in ("user", "leagues", "roster", "selected_league_id", "strategy"):
+    for key in ("user", "leagues", "roster", "selected_league_id", "strategy", "waiver_advice"):
         st.session_state.pop(key, None)
 
 
@@ -228,6 +265,7 @@ else:
     if st.session_state.get("selected_league_id") != selected_id or "roster" not in st.session_state:
         st.session_state.pop("roster", None)
         st.session_state.pop("strategy", None)
+        st.session_state.pop("waiver_advice", None)
         try:
             with st.spinner("Importing your roster…", show_time=True):
                 raw = find_user_roster(cached_rosters(selected_id), str(user["user_id"]))
@@ -239,6 +277,7 @@ else:
     roster: Roster | None = st.session_state.get("roster")
     if roster:
         metadata = cached_players()
+        league_rosters = cached_rosters(selected_id)
         schedule_verified = False
         schedule: dict[str, Any] = {}
         performances: dict[Any, Any] = {}
@@ -252,12 +291,17 @@ else:
                 performances = cached_performances(nfl_state, league.get("scoring_settings") or {})
             except FootballDataError:
                 pass
+        try:
+            identities = cached_identities(metadata)
+        except FootballDataError:
+            identities = {}
         weekly_contexts = build_player_weekly_contexts(
             roster,
             metadata,
             schedule,
             performances,
             schedule_verified=schedule_verified,
+            identities=identities,
         )
         st.html(
             f'<div class="fe-roster-title"><div><div class="fe-eyebrow">TEAM SHEET</div>'
@@ -265,8 +309,44 @@ else:
         )
         render_player_grid("Starting lineup", roster.starters, weekly_contexts, starters=True)
         render_player_grid("Bench", roster.bench, weekly_contexts)
-        st.html('<section class="fe-ai-panel"><div class="fe-ai-copy"><div class="fe-eyebrow">FANEDGE AI</div><h2>Ready for your weekly game plan?</h2><p>Analyze your roster construction and surface the decisions that matter most.</p></div></section>')
+
+        owned_ids = build_rostered_player_ids(league_rosters)
+        available_players = build_available_players(metadata, owned_ids)
+        available_contexts = build_player_weekly_contexts(
+            Roster(starters=available_players, bench=[]),
+            metadata,
+            schedule,
+            performances,
+            schedule_verified=schedule_verified,
+            identities=identities,
+        )
+        roster_needs = analyze_roster_needs(roster, weekly_contexts)
+        waiver_candidates = rank_waiver_candidates(available_players, available_contexts, roster_needs)
+        drop_candidates = find_drop_candidates(roster, weekly_contexts, roster_needs)
+        st.html(
+            '<section class="fe-waiver"><div class="fe-waiver-head"><div><div class="fe-eyebrow">LEAGUE-AWARE</div>'
+            '<h2>Waiver wire</h2><p>Best players actually available in your league.</p></div>'
+            f'<div class="fe-count">{len(waiver_candidates)} CANDIDATES</div></div></section>'
+        )
+        if waiver_candidates:
+            st.html(f'<div class="fe-waiver-grid">{"".join(render_waiver_candidate(item) for item in waiver_candidates)}</div>')
+            if not performances:
+                st.html('<div class="fe-waiver-note">Performance data is unavailable; rankings use ownership, roster depth, schedule, and status only.</div>')
+        else:
+            st.info("No trustworthy QB, RB, WR, or TE waiver candidates were found in this league.", icon=":material/info:")
+
         has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
+        if waiver_candidates and st.button("EXPLAIN MY WAIVER OPTIONS  →", width="stretch", disabled=not has_openai_key, key="waiver_button"):
+            try:
+                with st.spinner("Reviewing your waiver options…", show_time=True):
+                    st.session_state.waiver_advice = generate_waiver_advice(roster_needs, waiver_candidates, drop_candidates)
+            except Exception:
+                st.error("We couldn’t explain the waiver shortlist right now.", icon=":material/error:")
+        waiver_advice = st.session_state.get("waiver_advice")
+        if waiver_advice:
+            cards = "".join(f'<article class="fe-strategy-card"><div class="fe-strategy-label">{escape(item["title"])}</div><p>{escape(item["body"])}</p></article>' for item in waiver_advice)
+            st.html(f'<div class="fe-strategy-grid">{cards}</div>')
+        st.html('<section class="fe-ai-panel"><div class="fe-ai-copy"><div class="fe-eyebrow">FANEDGE AI</div><h2>Ready for your weekly game plan?</h2><p>Analyze your roster construction and surface the decisions that matter most.</p></div></section>')
         if st.button("GENERATE WEEKLY STRATEGY  →", type="primary", width="stretch", disabled=not has_openai_key, key="strategy_button"):
             try:
                 with st.spinner("Building your game plan…", show_time=True):

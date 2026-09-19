@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import gzip
 import io
-import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Iterable
@@ -14,10 +13,12 @@ from zoneinfo import ZoneInfo
 import requests
 
 from sleeper_api import Player, Roster
+from player_identity import PlayerIdentity, normalize_name
 
 
 SCHEDULE_URL = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv"
 STATS_URL = "https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{season}.csv.gz"
+PLAYERS_URL = "https://github.com/nflverse/nflverse-data/releases/download/players/players.csv"
 EASTERN = ZoneInfo("America/New_York")
 SEASON_TYPES = {"pre": "PRE", "regular": "REG", "post": "POST"}
 STAT_SCORING_KEYS = {
@@ -114,6 +115,10 @@ class NflverseClient:
             raise FootballDataError("Weekly player data was unreadable.") from exc
         return list(csv.DictReader(io.StringIO(content)))
 
+    def get_player_rows(self) -> list[dict[str, str]]:
+        content = self._get(PLAYERS_URL).decode("utf-8-sig")
+        return list(csv.DictReader(io.StringIO(content)))
+
 
 def normalize_nfl_state(raw: Any) -> NFLState:
     if not isinstance(raw, dict):
@@ -183,7 +188,11 @@ def fantasy_points(row: dict[str, Any], scoring: dict[str, Any], position: str) 
     """Calculate points only when all non-zero offensive scoring keys are supported."""
     offensive_keys = {
         key for key, value in scoring.items()
-        if _number(value) and any(token in key for token in ("pass", "rush", "rec", "fum"))
+        if _number(value)
+        and (
+            key.startswith(("pass_", "rush_", "rec_", "bonus_pass_", "bonus_rush_", "bonus_rec_"))
+            or key in {"fum", "fum_lost"}
+        )
     }
     supported = set(STAT_SCORING_KEYS) | {"fum_lost"}
     if offensive_keys - supported:
@@ -195,14 +204,13 @@ def fantasy_points(row: dict[str, Any], scoring: dict[str, Any], position: str) 
 
 
 def _identity(name: str, team: str, position: str) -> tuple[str, str, str]:
-    normalized_name = re.sub(r"[^a-z0-9]", "", name.lower())
-    return normalized_name, team.upper(), position.upper()
+    return normalize_name(name), team.upper(), position.upper()
 
 
 def build_performance_index(
     rows: Iterable[dict[str, str]], state: NFLState, scoring: dict[str, Any]
-) -> dict[tuple[str, str, str], list[GamePerformance]]:
-    index: dict[tuple[str, str, str], list[GamePerformance]] = {}
+) -> dict[Any, list[GamePerformance]]:
+    index: dict[Any, list[GamePerformance]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -220,7 +228,10 @@ def build_performance_index(
         points = fantasy_points(row, scoring, position)
         if points is None:
             continue
-        index.setdefault(_identity(name, team, position), []).append(GamePerformance(week, points))
+        performance = GamePerformance(week, points)
+        index.setdefault(_identity(name, team, position), []).append(performance)
+        if row.get("player_id"):
+            index.setdefault(("gsis", str(row["player_id"])), []).append(performance)
     for values in index.values():
         values.sort(key=lambda item: item.week)
     return index
@@ -242,16 +253,22 @@ def build_player_weekly_contexts(
     roster: Roster,
     metadata: dict[str, dict[str, Any]],
     schedule: dict[str, WeeklyGame],
-    performances: dict[tuple[str, str, str], list[GamePerformance]],
+    performances: dict[Any, list[GamePerformance]],
     *,
     schedule_verified: bool = True,
+    identities: dict[str, PlayerIdentity] | None = None,
 ) -> dict[str, PlayerWeeklyContext]:
     contexts: dict[str, PlayerWeeklyContext] = {}
     for player in (*roster.starters, *roster.bench):
         game = schedule.get(player.team)
         player_metadata = metadata.get(player.player_id)
         status, body_part = normalize_player_status(player_metadata)
-        games = tuple(performances.get(_identity(player.name, player.team, player.position), []))
+        identity = (identities or {}).get(player.player_id)
+        games = tuple(
+            performances.get(("gsis", identity.gsis_id), [])
+            if identity and identity.gsis_id
+            else performances.get(_identity(player.name, player.team, player.position), [])
+        )
         contexts[player.player_id] = PlayerWeeklyContext(
             player_id=player.player_id,
             name=player.name,
