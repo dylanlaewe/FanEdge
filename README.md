@@ -47,14 +47,23 @@ flowchart LR
 - `team_identity.py` maps explicit provider aliases to one of 32 canonical current NFL team IDs.
 - `matchup.py` calculates completed-game fantasy points allowed by defense and offensive position under the selected league's scoring.
 - `intelligence.py` normalizes historical baselines, participation, roles, evidence quality, and same-position teammate availability changes.
+- `opportunity_engine.py` converts factual change signals into corroborated events, user relevance, prioritized opportunities/risks, recommended actions, and structured explanation bundles.
 
 ## Product experience
 
-The connected experience is organized as a responsive fantasy application around four weekly jobs: **Overview**, **My Team**, **Waivers**, and **Ask FanEdge**. Desktop uses persistent left navigation; mobile converts it to a compact bottom bar. Overview is an editorial briefing rather than a KPI dashboard. My Team renders the league's real starting slots and bench as information-dense player rows, with position-specific production and workload signals. Waivers adds position filters and separates higher-priority adds from a lower-confidence watchlist. Ask FanEdge gives the existing constrained strategy explanation a first-class, honest entry point.
+The connected experience is organized as a responsive fantasy application around four weekly jobs: **Overview**, **My Team**, **Waivers**, and **Ask FanEdge**. Desktop uses persistent left navigation; mobile converts it to a compact bottom bar. Overview is now **Your Edge**, a proactive feed of the highest-priority changes that matter to the selected manager. My Team renders the league's real starting slots and bench as information-dense player rows, with position-specific production and workload signals. Waivers keeps its deterministic ranking and elevates players with corroborated opportunity events. Ask FanEdge receives the already-detected opportunity feed and may explain it, but cannot create new opportunities.
 
 Presentation is split into `styles.py` and reusable sports components in `components.py`; `app.py` remains responsible for data orchestration and page composition. The redesign does not change the lineup optimizer, waiver ranking, schedule inference, identity matching, or role model.
 
 The dashboard intentionally computes the intelligence batch once, then lets the user move between views without per-player HTTP calls. Missing or unsupported data is shown as an explicit limitation; it is never converted into a negative recommendation.
+
+## Opportunity Engine
+
+The M8 pipeline is deterministic: **facts → signals → events → user relevance → opportunity/risk → priority → action → explanation bundle**. Signal detectors use position-specific workload, snap participation, role trend, production, verified schedule, Sleeper status, matchup evidence, and exact league ownership. Trends require the existing four-game evidence gate and material magnitude thresholds. Multiple signals of the same type do not count as corroboration, contradictory change evidence creates neither a breakout nor decline event, and a fantasy-point spike without workload support is suppressed.
+
+Events become user-facing only when they affect a current starter, the user's bench, a direct lineup alternative, or a confirmed available player aligned with the user's roster. Actions are categorical—`ADD`, `CONSIDER_ADD`, `START`, `CONSIDER_START`, `MONITOR`, `HOLD`, `REVIEW`, or `NO_ACTION`—and do not force a transaction. Priorities are `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW`, derived from four integer axes: actionability, user relevance, evidence quality, and urgency. No arbitrary probability is shown.
+
+Opportunity objects retain stable IDs, subject/related players, structured signals, relevance relationships, confidence, action, and explanation facts. Nullable `first_seen_week`, `last_seen_week`, `resolved`, and `action_taken` fields reserve a future persistence contract without pretending that history is stored today. When no event clears the threshold, Overview shows a deliberate quiet state instead of manufacturing advice.
 
 ## Visual identity
 

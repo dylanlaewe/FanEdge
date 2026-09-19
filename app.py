@@ -10,7 +10,7 @@ from typing import Any
 import streamlit as st
 from dotenv import load_dotenv
 
-from components import action_row, page_header, player_row, prompt_tiles, section_title, swap_comparison, topbar, waiver_row
+from components import opportunity_card, page_header, player_row, prompt_tiles, section_title, swap_comparison, topbar, waiver_row
 from football_data import (
     FootballDataError, NFLState, NflverseClient, PlayerWeeklyContext, WeeklySchedule,
     build_performance_index, build_player_weekly_contexts, build_weekly_schedule, normalize_nfl_state,
@@ -19,6 +19,7 @@ from intelligence import build_availability_changes, build_historical_index, bui
 from lineup_optimizer import LineupDecision, build_current_lineup, optimize_lineup
 from matchup import DefenseVsPosition, build_defense_vs_position
 from opportunity import PlayerOpportunity, build_opportunity_index, build_player_opportunities
+from opportunity_engine import FantasyOpportunity, build_opportunity_feed
 from player_identity import PlayerIdentity, PlayerIdentityResolver
 from sleeper_api import Roster, SleeperAPIError, SleeperClient, build_roster, find_user_roster
 from strategy_engine import generate_lineup_advice, generate_strategy, generate_waiver_advice
@@ -27,7 +28,6 @@ from waiver_engine import (
     WaiverCandidate, analyze_roster_needs, build_available_players, build_rostered_player_ids,
     find_drop_candidates, rank_waiver_candidates,
 )
-from visuals import player_visual
 
 load_dotenv()
 st.set_page_config(page_title="FanEdge — AI Fantasy GM", page_icon="🏈", layout="wide")
@@ -104,10 +104,6 @@ def reset_team() -> None:
         st.session_state.pop(key, None)
 
 
-def navigate(destination: str) -> None:
-    st.session_state.application_nav = destination
-
-
 def render_landing(nfl_state: NFLState | None) -> None:
     week = f"NFL · WEEK {nfl_state.week}" if nfl_state and nfl_state.week else "NFL FANTASY"
     st.html('<nav class="fe-landing-nav"><div class="fe-wordmark">FAN<span>EDGE</span></div>' f'<div class="fe-landing-meta">{escape(week)}</div></nav>')
@@ -142,55 +138,38 @@ def render_landing(nfl_state: NFLState | None) -> None:
             st.error(str(exc), icon=":material/error:")
 
 
-def injury_players(roster: Roster, contexts: dict[str, PlayerWeeklyContext]) -> list[Any]:
-    watched = {"questionable", "doubtful", "out", "ir", "pup"}
-    return [player for player in (*roster.starters, *roster.bench) if str((contexts.get(player.player_id).status if contexts.get(player.player_id) else "") or "").lower() in watched]
-
-
 def top_adds(candidates: list[WaiverCandidate]) -> list[WaiverCandidate]:
     return [candidate for candidate in candidates if candidate.intelligence and (candidate.intelligence.role in {"FEATURED", "STARTER", "EMERGING"} or any(reason in {"Opportunity rising", "Role expanding", "Snap share rising"} for reason in candidate.reasons))][:4]
 
 
 def render_overview(
-    league: dict[str, Any], nfl_state: NFLState | None, lineup_health: Any,
-    lineup_decisions: list[LineupDecision], waiver_candidates: list[WaiverCandidate],
-    contexts: dict[str, PlayerWeeklyContext], roster: Roster,
+    league: dict[str, Any], nfl_state: NFLState | None, feed: list[FantasyOpportunity],
     identities: dict[str, PlayerIdentity], data_available: bool,
 ) -> None:
     week = f"Week {nfl_state.week}" if nfl_state else "This week"
-    injuries = injury_players(roster, contexts)
-    adds = top_adds(waiver_candidates)
-    attention = sum((bool(lineup_decisions), bool(adds), bool(injuries)))
-    briefing = "Your lineup is holding. The best edge is on waivers." if not lineup_decisions and adds else "Your weekly decisions are ready for review." if attention else "No move is currently supported by enough evidence."
-    st.html(page_header("Weekly command center", f"{week} briefing", "What changed, what needs attention, and what to do next."))
+    st.html(page_header("Your edge", "What changed", f"{week} · Proactive decisions for {league.get('name') or 'your league'}."))
+    headline = f"FanEdge found {len(feed)} {'thing' if len(feed) == 1 else 'things'} worth your attention." if feed else "No major changes."
+    detail = "Prioritized from changes in role, opportunity, availability, matchup, and your actual roster." if feed else "FanEdge did not find new evidence strong enough to change your current plan."
     st.html(
-        '<section class="fe-briefing"><div class="fe-briefing-kicker">FANEDGE READOUT</div>'
-        f'<h2>{escape(briefing)}</h2><p>FanEdge found {attention} {"area" if attention == 1 else "areas"} worth your attention in {escape(str(league.get("name") or "your league"))}.</p></section>'
+        '<section class="fe-briefing"><div class="fe-briefing-kicker">FANEDGE OPPORTUNITY ENGINE</div>'
+        f'<h2>{escape(headline)}</h2><p>{escape(detail)}</p></section>'
     )
     if not data_available:
-        st.info("Some weekly football data is unavailable. Unsupported lineup or waiver conclusions are withheld.", icon=":material/info:")
-    lineup_title = f"{len(lineup_decisions)} lineup decision{'s' if len(lineup_decisions) != 1 else ''} worth reviewing" if lineup_decisions else "Your current lineup holds"
-    lineup_detail = " · ".join(f"{item.challenger.name} over {item.starter.name if item.starter else 'an empty slot'}" for item in lineup_decisions[:2]) if lineup_decisions else "No bench player clears the evidence threshold for a swap."
-    waiver_title = f"{len(adds)} priority add{'s' if len(adds) != 1 else ''} surfaced" if adds else "No priority add is justified"
-    waiver_detail = " · ".join(item.player.name for item in adds[:3]) or "The watchlist remains available for lower-confidence signals."
-    health_title = f"{len(injuries)} player status{'es' if len(injuries) != 1 else ''} to monitor" if injuries else "No active roster health warning"
-    health_detail = " · ".join(player.name for player in injuries[:3]) or "No current designation requires action."
-    st.html('<div class="fe-action-list">' + action_row(1, "LINEUP", lineup_title, lineup_detail, "REVIEW" if lineup_decisions else "SET") + action_row(2, "WAIVERS", waiver_title, waiver_detail, "EXPLORE" if waiver_candidates else "CLEAR") + action_row(3, "WATCH", health_title, health_detail, "MONITOR" if injuries else "CLEAR") + "</div>")
-    priority_player = lineup_decisions[0].challenger if lineup_decisions else adds[0].player if adds else injuries[0] if injuries else None
-    if priority_player:
-        priority_context = contexts.get(priority_player.player_id)
-        if lineup_decisions:
-            title, reason, target = f"Consider {priority_player.name} in {lineup_decisions[0].slot_id}", " · ".join(lineup_decisions[0].reasons), "My Team"
-        elif adds:
-            title, reason, target = f"Take a closer look at {priority_player.name}", " · ".join(adds[0].reasons), "Waivers"
-        else:
-            title, reason, target = f"Monitor {priority_player.name}", str(priority_context.status if priority_context else "Status needs attention"), "My Team"
-        st.html(
-            '<div class="fe-section-title"><h2>Top priority</h2><span>Evidence-backed</span></div><section class="fe-priority">'
-            f'{player_visual(identities.get(priority_player.player_id), priority_player.name, priority_player.position, priority_player.team, size="large")}'
-            f'<div><div class="fe-eyebrow">{escape(target)}</div><h3>{escape(title)}</h3><p>{escape(reason)}</p></div></section>'
-        )
-        st.button(f"Open {target}", type="primary", on_click=navigate, args=(target,), key="priority_navigation")
+        st.info("Some weekly football data is unavailable. Unsupported conclusions are withheld.", icon=":material/info:")
+    if not feed:
+        st.html('<section class="fe-quiet"><div class="fe-eyebrow">PLAN HOLDS</div><h3>No action required</h3><p>Quiet weeks are useful: FanEdge will not manufacture a recommendation.</p></section>')
+        return
+    st.html(section_title("Prioritized feed", len(feed), "item" if len(feed) == 1 else "items"))
+    st.html('<div class="fe-edge-feed">')
+    for item in feed:
+        identity = identities.get(item.subject_player.player_id) if item.subject_player else None
+        st.html(opportunity_card(item, identity))
+        label = item.subject_player.name if item.subject_player else item.opportunity_type
+        with st.expander(f"Why this matters · {label}"):
+            for fact in item.explanation_context:
+                st.markdown(f"- {fact}")
+            st.caption(f"Action: {item.recommended_action.replace('_', ' ')} · Confidence: {item.confidence} · Relevance: {', '.join(item.relevance)}")
+    st.html('</div>')
 
 
 def render_decision_evidence(decision: LineupDecision) -> None:
@@ -209,7 +188,7 @@ def render_my_team(
     lineup_slots: list[Any], roster: Roster, contexts: dict[str, PlayerWeeklyContext],
     opportunities: dict[str, PlayerOpportunity], profiles: dict[str, Any],
     identities: dict[str, PlayerIdentity], decisions: list[LineupDecision],
-    lineup_health: Any, has_openai_key: bool,
+    has_openai_key: bool,
 ) -> None:
     st.html(page_header("My team", "Your lineup, in context", "Actual league slots with the signal that matters for each position."))
     if not decisions:
@@ -245,11 +224,14 @@ def render_my_team(
 def render_waivers(
     candidates: list[WaiverCandidate], opportunities: dict[str, PlayerOpportunity], identities: dict[str, PlayerIdentity],
     roster_needs: Any, drop_candidates: list[Any], has_openai_key: bool,
+    feed: list[FantasyOpportunity],
 ) -> None:
     st.html(page_header("Waivers", "Find the next useful player", "Ranked against your roster needs, league ownership, and role evidence."))
     position = st.segmented_control("Filter by position", ["All", "RB", "WR", "TE", "QB"], default="All", key="waiver_position", label_visibility="collapsed")
-    filtered = [item for item in candidates if position == "All" or item.player.position == position]
-    adds = [item for item in top_adds(candidates) if item in filtered]
+    opportunity_ids = {item.subject_player.player_id for item in feed if item.subject_player and item.opportunity_type in {"WAIVER_OPPORTUNITY", "BREAKOUT_WATCH"}}
+    ordered = sorted(candidates, key=lambda item: (item.player.player_id not in opportunity_ids, -item.score, item.player.name.lower()))
+    filtered = [item for item in ordered if position == "All" or item.player.position == position]
+    adds = [item for item in filtered if item.player.player_id in opportunity_ids or item in top_adds(candidates)][:4]
     watchlist = [item for item in filtered if item not in adds]
     st.html(section_title("Top adds", len(adds)))
     if adds:
@@ -278,7 +260,11 @@ def render_waivers(
             st.html('<section class="fe-ai-result">' f'<h3>{escape(item["title"])}</h3><p>{escape(item["body"])}</p></section>')
 
 
-def render_ask_fanedge(roster: Roster, league: dict[str, Any], nfl_state: NFLState | None, contexts: dict[str, PlayerWeeklyContext], has_openai_key: bool) -> None:
+def render_ask_fanedge(
+    roster: Roster, league: dict[str, Any], nfl_state: NFLState | None,
+    contexts: dict[str, PlayerWeeklyContext], has_openai_key: bool,
+    feed: list[FantasyOpportunity],
+) -> None:
     st.html(
         '<section class="fe-ai-hero"><div><div class="fe-eyebrow">ASK FANEDGE</div><h1>Your league context, explained.</h1>'
         '<p>FanEdge can turn the lineup, waiver, role, and availability evidence already calculated for your team into a concise weekly plan.</p></div>'
@@ -289,7 +275,7 @@ def render_ask_fanedge(roster: Roster, league: dict[str, Any], nfl_state: NFLSta
     if st.button("Build my weekly strategy", type="primary", width="stretch", disabled=not has_openai_key, key="strategy_button"):
         try:
             with st.spinner("Building your weekly strategy…", show_time=True):
-                st.session_state.strategy = generate_strategy(roster, league, nfl_state=nfl_state, weekly_contexts=contexts)
+                st.session_state.strategy = generate_strategy(roster, league, nfl_state=nfl_state, weekly_contexts=contexts, opportunity_feed=feed)
         except Exception:
             st.error("We couldn’t build your strategy right now.", icon=":material/error:")
     if not has_openai_key:
@@ -367,16 +353,21 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
     available_profiles = build_role_profiles(available_players, available_opportunities, identities, historical_index, participation_index, availability_index, depth_ranks, historical_participation)
     waiver_candidates = rank_waiver_candidates(available_players, available_contexts, roster_needs, opportunities=available_opportunities, profiles=available_profiles)
     drop_candidates = find_drop_candidates(roster, contexts, roster_needs)
+    opportunity_feed = build_opportunity_feed(
+        roster, contexts, opportunities, profiles, lineup_slots, decisions,
+        waiver_candidates, available_opportunities, roster_needs, matchup_index,
+        week=nfl_state.week if nfl_state else None,
+    )
     has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
     view = st.session_state.application_nav
     if view == "Overview":
-        render_overview(league, nfl_state, lineup_health, decisions, waiver_candidates, contexts, roster, identities, bool(performances))
+        render_overview(league, nfl_state, opportunity_feed, identities, bool(performances))
     elif view == "My Team":
-        render_my_team(lineup_slots, roster, contexts, opportunities, profiles, identities, decisions, lineup_health, has_openai_key)
+        render_my_team(lineup_slots, roster, contexts, opportunities, profiles, identities, decisions, has_openai_key)
     elif view == "Waivers":
-        render_waivers(waiver_candidates, available_opportunities, identities, roster_needs, drop_candidates, has_openai_key)
+        render_waivers(waiver_candidates, available_opportunities, identities, roster_needs, drop_candidates, has_openai_key, opportunity_feed)
     else:
-        render_ask_fanedge(roster, league, nfl_state, contexts, has_openai_key)
+        render_ask_fanedge(roster, league, nfl_state, contexts, has_openai_key, opportunity_feed)
 
 
 try:
