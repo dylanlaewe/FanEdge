@@ -15,6 +15,8 @@ FanEdge is an AI-powered fantasy football strategist for real Sleeper leagues. I
 - Builds an exact league ownership index across starters, bench, reserve/IR, taxi, and practice-squad containers
 - Ranks 5–10 actually available QB/RB/WR/TE options against the user's roster-depth, injury, and bye needs
 - Generates optional waiver explanations from only the deterministic shortlist and conservative bench-only drop candidates
+- Models the league's actual starting slots, including flex and superflex eligibility, and checks the current lineup for material bench challenges
+- Adds completed-game opportunity context: attempts, carries, targets, receptions, touches, and conservative usage trends
 - Handles missing users, leagues, rosters, player metadata, API failures, and missing AI configuration
 - Caches read-heavy Sleeper data for a responsive experience
 
@@ -39,12 +41,22 @@ flowchart LR
 - `football_data.py` normalizes Sleeper state/status plus nflverse schedule and completed-game statistics into provider-neutral weekly context.
 - `player_identity.py` resolves Sleeper players to nflverse GSIS IDs through provider IDs, exact normalized identity, and a unique name/position trade-lag fallback. Ambiguous matches stay unresolved.
 - `waiver_engine.py` owns league-wide exclusion, roster-needs analysis, transparent candidate scoring, and conservative drop-candidate generation.
+- `opportunity.py` derives position-aware completed-game usage summaries from nflverse weekly statistics.
+- `lineup_optimizer.py` normalizes Sleeper lineup slots and solves a deterministic one-to-one starter/bench assignment.
 
 ## Waiver ranking
 
 Only active, well-formed QB/RB/WR/TE records not found in any league roster container enter the candidate pool. FanEdge calculates a score from 60% recent and 40% season fantasy average, discounted for samples under four games. It then applies small, documented adjustments for trend, shallow positional depth, injury/bye pressure, and the player's availability status. Missing performance remains unknown rather than zero; those candidates can still appear when provider statistics or custom scoring are unavailable. Results use stable name/ID tie-breakers and are capped at three players per position.
 
 Drop candidates are limited to the user's bench, require at least two completed games, exclude injured stashes, and are omitted when the position is already shallow. They are options for AI explanation—not automatic drop instructions.
+
+## Lineup optimization
+
+FanEdge reads the league's real `roster_positions` rather than assuming a standard lineup. Each duplicate slot remains independent, with explicit eligibility for FLEX, WR/RB flex, receiver flex, superflex, K, and DEF.
+
+The comparison signal combines completed-game fantasy production, position-aware opportunity volume, sample size, usage trend, injury status, and verified byes. It is not a projection and does not apply an unsupported matchup-strength adjustment. Differences under 2 points retain the current starter automatically; 2–3.99 is a close call, 4–7.99 is consider swap, and 8+ is strong swap. Close calls require at least two games for both players. Out/IR/PUP and verified-bye starters receive a safety penalty only when a healthy, eligible replacement exists. A dynamic-programming assignment maximizes the total evidence-backed improvement while ensuring one bench player fills at most one slot.
+
+Usage trend requires four completed games. It compares the most recent two-game position-specific workload average with the preceding-game average using a threshold of the larger of 1.5 opportunities or 20%. One-game starts remain `INSUFFICIENT DATA`. The current nflverse weekly dataset reliably supplies QB attempts/completions/rushes, RB carries/targets/receptions, and WR/TE targets/receptions. Broad snap share and route participation are intentionally omitted because they are not consistently present in that source.
 
 No database or authentication is used in this MVP.
 
@@ -94,6 +106,7 @@ The Sleeper roster experience still works without an OpenAI key; only strategy g
 - Supports Sleeper NFL leagues only and has no user accounts or saved history.
 - Weekly opponent and kickoff data come from nflverse; injury designations come from Sleeper metadata and may lag official club reporting.
 - Cross-provider identity resolution is intentionally conservative. Unresolved or ambiguous players retain schedule/status context but do not inherit another player's statistics.
+- Lineup recommendations use completed games and current availability, not future-point projections. Early-season samples are therefore intentionally conservative.
 - Custom offensive scoring bonuses or unsupported scoring keys disable performance averages rather than showing inaccurate points.
 - No projections, trade values, or news are supplied. Waiver availability is based only on Sleeper league ownership, and the model is explicitly told not to invent unavailable facts.
 - The current season is selected automatically. Historical-season selection is not yet exposed.
