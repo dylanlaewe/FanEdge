@@ -50,7 +50,9 @@ flowchart LR
 
 ## Product experience
 
-The connected experience is organized around four weekly jobs: **Overview**, **Lineup**, **Waivers**, and **Roster**. Overview is a compact briefing with lineup decisions, injury watches, and waiver targets. Lineup gives evidence-backed swaps or a reassuring no-change state. Waivers separates higher-priority adds from lower-confidence watchlist signals. Roster remains a reference view with matchup, schedule, opportunity, role, and snap-share details.
+The connected experience is organized as a responsive fantasy application around four weekly jobs: **Overview**, **My Team**, **Waivers**, and **Ask FanEdge**. Desktop uses persistent left navigation; mobile converts it to a compact bottom bar. Overview is an editorial briefing rather than a KPI dashboard. My Team renders the league's real starting slots and bench as information-dense player rows, with position-specific production and workload signals. Waivers adds position filters and separates higher-priority adds from a lower-confidence watchlist. Ask FanEdge gives the existing constrained strategy explanation a first-class, honest entry point.
+
+Presentation is split into `styles.py` and reusable sports components in `components.py`; `app.py` remains responsible for data orchestration and page composition. The redesign does not change the lineup optimizer, waiver ranking, schedule inference, identity matching, or role model.
 
 The dashboard intentionally computes the intelligence batch once, then lets the user move between views without per-player HTTP calls. Missing or unsupported data is shown as an explicit limitation; it is never converted into a negative recommendation.
 
