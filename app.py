@@ -79,6 +79,12 @@ div[data-testid="stForm"]{max-width:620px;margin:-1rem auto 0;padding:.55rem 1.8
 """)
 
 
+st.html("""<style>
+.fe-brief{padding:2.6rem 0 1.2rem}.fe-brief h2,.fe-view-head h2{margin:.45rem 0 .35rem;font-size:clamp(2rem,4vw,3rem);letter-spacing:-.055em}.fe-brief p,.fe-view-head p{margin:0;color:var(--muted);font-size:.9rem}.fe-kpi{padding:1.1rem 1.2rem;background:linear-gradient(145deg,#151c24,#10151b);border:1px solid var(--border);border-radius:12px}.fe-kpi-value{font-size:2rem;font-weight:850;letter-spacing:-.06em;color:var(--lime)}.fe-kpi-label{margin-top:.2rem;color:var(--muted);font-size:.68rem;text-transform:uppercase;letter-spacing:.1em}.fe-overview-grid{margin-top:1.2rem;border-top:1px solid var(--border)}.fe-brief-row{display:flex;gap:1rem;align-items:center;padding:1.1rem .2rem;border-bottom:1px solid var(--border)}.fe-brief-icon{flex:0 0 82px;color:var(--lime);font-size:.62rem;font-weight:850;letter-spacing:.12em}.fe-brief-row strong{font-size:1rem}.fe-brief-row p{margin:.25rem 0 0;color:var(--muted);font-size:.78rem}.fe-view-head{padding:2.4rem 0 1.2rem}.fe-no-change{display:flex;gap:1rem;align-items:flex-start;margin-top:.7rem;padding:1.5rem;background:linear-gradient(145deg,#162019,#111a15);border:1px solid #304735;border-radius:14px}.fe-no-change-mark{display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:rgba(182,242,58,.13);color:var(--lime);font-size:1.1rem}.fe-no-change h3{margin:.45rem 0 .35rem;font-size:1.25rem}.fe-no-change p{max-width:650px;margin:0;color:#aeb9b0;font-size:.82rem;line-height:1.55}
+.fe-role{padding:.18rem .35rem;border:1px solid rgba(182,242,58,.28);border-radius:999px;color:var(--lime);font-size:.58rem;font-weight:800;text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:640px){.fe-brief{padding-top:1.8rem}.fe-kpi{padding:.85rem}.fe-kpi-value{font-size:1.55rem}.fe-brief-icon{flex-basis:64px}.fe-brief-row{gap:.6rem}.fe-brief-row strong{font-size:.88rem}}
+</style>""")
+
 def current_nfl_season(now: datetime | None = None) -> int:
     today = now or datetime.now()
     return today.year - 1 if today.month <= 2 else today.year
@@ -149,6 +155,7 @@ def render_player_grid(
     roster_players: list[Any],
     weekly_contexts: dict[str, PlayerWeeklyContext],
     opportunities: dict[str, PlayerOpportunity] | None = None,
+    profiles: dict[str, Any] | None = None,
     *,
     starters: bool = False,
 ) -> None:
@@ -191,6 +198,11 @@ def render_player_grid(
             label = "ATT" if player.position == "QB" else "TOUCH" if player.position == "RB" else "TGT"
             if usage is not None:
                 details.append(f'<span class="fe-performance">{label} <span>{usage:.1f}/G</span></span>')
+        profile = (profiles or {}).get(player.player_id) if player.position in {"QB", "RB", "WR", "TE"} else None
+        if profile:
+            details.append(f'<span class="fe-role">{escape(profile.role.title())}</span>')
+            if profile.participation and profile.participation.recent_snap_share is not None:
+                details.append(f'<span class="fe-performance">SNAPS <span>{profile.participation.recent_snap_share:.0%}</span></span>')
         detail_row = f'<div class="fe-player-detail">{"".join(details)}</div>' if details else ""
         cards += (
             f'<article class="{card_class}"><div class="fe-player-top">'
@@ -258,6 +270,79 @@ def render_lineup_check(decisions: list[LineupDecision], health: Any) -> None:
                         st.caption(f"Source: {item.source_type}")
             else:
                 st.caption("No additional structured evidence is available.")
+
+
+def _role_label(candidate: WaiverCandidate) -> str:
+    return candidate.intelligence.role.title() if candidate.intelligence else "Role unknown"
+
+
+def render_overview(league: dict[str, Any], nfl_state: NFLState | None, lineup_health: Any, lineup_decisions: list[LineupDecision], waiver_candidates: list[WaiverCandidate], weekly_contexts: dict[str, PlayerWeeklyContext], roster: Roster, data_available: bool = True) -> None:
+    week = f"Week {nfl_state.week}" if nfl_state else "This week"
+    st.html(f'<section class="fe-brief"><div class="fe-eyebrow">FANEDGE BRIEFING</div><h2>{escape(week)} · {escape(str(league.get("name") or "Your league"))}</h2><p>Only the decisions and watch items worth your attention right now.</p></section>')
+    if not data_available:
+        st.info("Some weekly football data is unavailable, so FanEdge is withholding unsupported lineup or waiver conclusions.", icon=":material/info:")
+    cols = st.columns(3)
+    for col, value, label in zip(cols, (lineup_health.decisions, lineup_health.injury_watches, min(3, len(waiver_candidates))), ("Lineup decisions", "Injury watches", "Waiver targets")):
+        with col:
+            st.html(f'<div class="fe-kpi"><div class="fe-kpi-value">{value}</div><div class="fe-kpi-label">{label}</div></div>')
+    st.html('<div class="fe-overview-grid">')
+    lineup_text = "No change is justified by the current evidence." if not lineup_decisions else f"{len(lineup_decisions)} decision worth reviewing"
+    lineup_detail = "FanEdge did not find a bench player with enough evidence to justify changing your starters." if not lineup_decisions else " · ".join(f"{d.challenger.name} over {d.starter.name if d.starter else 'an empty slot'}" for d in lineup_decisions[:2])
+    waiver_names = " · ".join(c.player.name for c in waiver_candidates[:3]) or "No trustworthy targets surfaced"
+    injury_names = [p.name for p in (*roster.starters, *roster.bench) if (weekly_contexts.get(p.player_id) and str(weekly_contexts[p.player_id].status or '').lower() in {'questionable','doubtful','out','ir','pup'})]
+    st.html(f'<article class="fe-brief-row"><span class="fe-brief-icon">LINEUP</span><div><strong>{escape(lineup_text)}</strong><p>{escape(lineup_detail)}</p></div></article>')
+    st.html(f'<article class="fe-brief-row"><span class="fe-brief-icon">WAIVERS</span><div><strong>{escape(waiver_names)}</strong><p>Available in your league · ranked for roster fit.</p></div></article>')
+    st.html(f'<article class="fe-brief-row"><span class="fe-brief-icon">HEALTH</span><div><strong>{escape(" · ".join(injury_names[:3]) if injury_names else "No active starter warnings")}</strong><p>{"Monitor these players before kickoff." if injury_names else "No current status requires action."}</p></div></article>')
+    st.html('</div>')
+
+
+def render_lineup_view(lineup_slots: list[Any], lineup_decisions: list[LineupDecision], lineup_health: Any, roster: Roster, weekly_contexts: dict[str, PlayerWeeklyContext], opportunities: dict[str, PlayerOpportunity], profiles: dict[str, Any], has_openai_key: bool) -> None:
+    st.html('<div class="fe-view-head"><div class="fe-eyebrow">LINEUP</div><h2>Set your best lineup</h2><p>Review only the changes supported by enough evidence.</p></div>')
+    if not lineup_decisions:
+        st.html('<section class="fe-no-change"><div class="fe-no-change-mark">✓</div><div><div class="fe-eyebrow">LINEUP LOOKS GOOD</div><h3>No change is justified this week</h3><p>FanEdge did not find a bench player with enough evidence to justify changing your starters. That is a confidence signal, not a claim of perfection.</p></div></section>')
+    else:
+        render_lineup_check(lineup_decisions, lineup_health)
+        if st.button("Explain these decisions", width="stretch", disabled=not has_openai_key, key="lineup_button"):
+            try:
+                with st.spinner("Building your evidence summary…"):
+                    st.session_state.lineup_advice = generate_lineup_advice(lineup_slots, lineup_decisions, weekly_contexts, opportunities, profiles)
+            except Exception:
+                st.error("We couldn’t explain the lineup decisions right now. Please try again.", icon=":material/error:")
+        if st.session_state.get("lineup_advice"):
+            st.html(f'<div class="fe-ai-lineup"><div class="fe-eyebrow">FANEDGE ANALYSIS</div>{escape(st.session_state.lineup_advice)}</div>')
+
+
+def render_waivers_view(waiver_candidates: list[WaiverCandidate], roster_needs: Any, roster: Roster, drop_candidates: list[Any], has_openai_key: bool) -> None:
+    st.html('<div class="fe-view-head"><div class="fe-eyebrow">WAIVERS</div><h2>Best players actually available</h2><p>Priority adds and lower-risk watchlist signals, separated by evidence.</p></div>')
+    adds = [c for c in waiver_candidates if c.intelligence and (c.intelligence.role in {"FEATURED", "STARTER", "EMERGING"} or any("Opportunity rising" in r or "Role expanding" in r for r in c.reasons))][:4]
+    watchlist = [c for c in waiver_candidates if c not in adds]
+    st.markdown("### Top adds")
+    if adds:
+        st.html(f'<div class="fe-waiver-grid">{"".join(render_waiver_candidate(item) for item in adds)}</div>')
+    else:
+        st.caption("No candidate has enough evidence to be a confident add.")
+    st.markdown("### Watchlist")
+    if watchlist:
+        st.html(f'<div class="fe-waiver-grid">{"".join(render_waiver_candidate(item) for item in watchlist[:4])}</div>')
+    else:
+        st.caption("No additional watchlist signals surfaced.")
+    if not waiver_candidates:
+        st.info("No trustworthy QB, RB, WR, or TE waiver candidates were found in this league.", icon=":material/info:")
+    if waiver_candidates and st.button("Explain my waiver options", width="stretch", disabled=not has_openai_key, key="waiver_button"):
+        try:
+            with st.spinner("Summarizing your waiver options…"):
+                st.session_state.waiver_advice = generate_waiver_advice(roster_needs, waiver_candidates, drop_candidates)
+        except Exception:
+            st.error("We couldn’t explain the waiver shortlist right now. Please try again.", icon=":material/error:")
+    if st.session_state.get("waiver_advice"):
+        cards = "".join(f'<article class="fe-strategy-card"><div class="fe-strategy-label">{escape(item["title"])}</div><p>{escape(item["body"])}</p></article>' for item in st.session_state.waiver_advice)
+        st.html(f'<div class="fe-strategy-grid">{cards}</div>')
+
+
+def render_roster_view(roster: Roster, weekly_contexts: dict[str, PlayerWeeklyContext], opportunities: dict[str, PlayerOpportunity], profiles: dict[str, Any]) -> None:
+    st.html('<div class="fe-view-head"><div class="fe-eyebrow">ROSTER</div><h2>Your team at a glance</h2><p>Reference your starters and bench without burying the weekly decisions.</p></div>')
+    render_player_grid("Starters", roster.starters, weekly_contexts, opportunities, profiles, starters=True)
+    render_player_grid("Bench", roster.bench, weekly_contexts, opportunities, profiles)
 
 
 def reset_team() -> None:
@@ -352,14 +437,13 @@ else:
         historical_index: dict[Any, Any] = {}; participation_index: dict[Any, Any] = {}
         historical_participation: dict[Any, Any] = {}; availability_index: dict[Any, Any] = {}; depth_ranks: dict[str, int] = {}
         if nfl_state:
-            try:
-                schedule = cached_weekly_schedule(nfl_state)
-            except FootballDataError:
-                pass
-            try:
-                performances, opportunity_index, matchup_index, historical_index, participation_index, historical_participation, availability_index, depth_ranks = cached_weekly_indexes(nfl_state, league.get("scoring_settings") or {})
-            except FootballDataError:
-                pass
+            with st.status(f"Loading Week {nfl_state.week} intelligence", expanded=False) as load_status:
+                try:
+                    schedule = cached_weekly_schedule(nfl_state)
+                    performances, opportunity_index, matchup_index, historical_index, participation_index, historical_participation, availability_index, depth_ranks = cached_weekly_indexes(nfl_state, league.get("scoring_settings") or {})
+                    load_status.update(label="Week intelligence ready", state="complete")
+                except FootballDataError:
+                    load_status.update(label="Some weekly data is unavailable", state="error")
         try:
             identities = cached_identities(metadata)
         except FootballDataError:
@@ -375,13 +459,6 @@ else:
             (*roster.starters, *roster.bench), opportunity_index, identities
         )
         profiles = build_role_profiles((*roster.starters, *roster.bench), opportunities, identities, historical_index, participation_index, availability_index, depth_ranks, historical_participation)
-        st.html(
-            f'<div class="fe-roster-title"><div><div class="fe-eyebrow">TEAM SHEET</div>'
-            f'<h2>My roster</h2></div><div class="fe-count">{len(roster.starters) + len(roster.bench)} TOTAL</div></div>'
-        )
-        render_player_grid("Starting lineup", roster.starters, weekly_contexts, opportunities, starters=True)
-        render_player_grid("Bench", roster.bench, weekly_contexts, opportunities)
-
         lineup_slots = build_current_lineup(
             st.session_state.raw_roster, metadata, league.get("roster_positions") or []
         )
@@ -394,19 +471,7 @@ else:
             {player_id: bool(identity.gsis_id) for player_id, identity in identities.items()},
             profiles,
         )
-        render_lineup_check(lineup_decisions, lineup_health)
         has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
-        if lineup_decisions and st.button("EXPLAIN LINEUP DECISIONS  →", width="stretch", disabled=not has_openai_key, key="lineup_button"):
-            try:
-                with st.spinner("Reviewing your lineup…", show_time=True):
-                    st.session_state.lineup_advice = generate_lineup_advice(
-                        lineup_slots, lineup_decisions, weekly_contexts, opportunities, profiles
-                    )
-            except Exception:
-                st.error("We couldn’t explain the lineup decisions right now.", icon=":material/error:")
-        if st.session_state.get("lineup_advice"):
-            st.html(f'<div class="fe-ai-lineup">{escape(st.session_state.lineup_advice)}</div>')
-
         owned_ids = build_rostered_player_ids(league_rosters)
         available_players = build_available_players(metadata, owned_ids)
         available_contexts = build_player_weekly_contexts(
@@ -421,40 +486,29 @@ else:
         available_profiles = build_role_profiles(available_players, available_opportunities, identities, historical_index, participation_index, availability_index, depth_ranks, historical_participation)
         waiver_candidates = rank_waiver_candidates(available_players, available_contexts, roster_needs, opportunities=available_opportunities, profiles=available_profiles)
         drop_candidates = find_drop_candidates(roster, weekly_contexts, roster_needs)
-        st.html(
-            '<section class="fe-waiver"><div class="fe-waiver-head"><div><div class="fe-eyebrow">LEAGUE-AWARE</div>'
-            '<h2>Waiver wire</h2><p>Best players actually available in your league.</p></div>'
-            f'<div class="fe-count">{len(waiver_candidates)} CANDIDATES</div></div></section>'
-        )
-        if waiver_candidates:
-            st.html(f'<div class="fe-waiver-grid">{"".join(render_waiver_candidate(item) for item in waiver_candidates)}</div>')
-            if not performances:
-                st.html('<div class="fe-waiver-note">Performance data is unavailable; rankings use ownership, roster depth, schedule, and status only.</div>')
+        view = st.segmented_control("Your weekly workspace", ["Overview", "Lineup", "Waivers", "Roster"], default="Overview", key="workspace_view", label_visibility="collapsed")
+        if view == "Overview":
+            render_overview(league, nfl_state, lineup_health, lineup_decisions, waiver_candidates, weekly_contexts, roster, bool(performances))
+        elif view == "Lineup":
+            render_lineup_view(lineup_slots, lineup_decisions, lineup_health, roster, weekly_contexts, opportunities, profiles, has_openai_key)
+        elif view == "Waivers":
+            render_waivers_view(waiver_candidates, roster_needs, roster, drop_candidates, has_openai_key)
         else:
-            st.info("No trustworthy QB, RB, WR, or TE waiver candidates were found in this league.", icon=":material/info:")
-
-        if waiver_candidates and st.button("EXPLAIN MY WAIVER OPTIONS  →", width="stretch", disabled=not has_openai_key, key="waiver_button"):
-            try:
-                with st.spinner("Reviewing your waiver options…", show_time=True):
-                    st.session_state.waiver_advice = generate_waiver_advice(roster_needs, waiver_candidates, drop_candidates)
-            except Exception:
-                st.error("We couldn’t explain the waiver shortlist right now.", icon=":material/error:")
-        waiver_advice = st.session_state.get("waiver_advice")
-        if waiver_advice:
-            cards = "".join(f'<article class="fe-strategy-card"><div class="fe-strategy-label">{escape(item["title"])}</div><p>{escape(item["body"])}</p></article>' for item in waiver_advice)
-            st.html(f'<div class="fe-strategy-grid">{cards}</div>')
-        st.html('<section class="fe-ai-panel"><div class="fe-ai-copy"><div class="fe-eyebrow">FANEDGE AI</div><h2>Ready for your weekly game plan?</h2><p>Analyze your roster construction and surface the decisions that matter most.</p></div></section>')
-        if st.button("GENERATE WEEKLY STRATEGY  →", type="primary", width="stretch", disabled=not has_openai_key, key="strategy_button"):
-            try:
-                with st.spinner("Building your game plan…", show_time=True):
-                    st.session_state.strategy = generate_strategy(
-                        roster,
-                        league,
-                        nfl_state=nfl_state,
-                        weekly_contexts=weekly_contexts,
-                    )
-            except Exception:
-                st.error("We couldn’t build your strategy right now. Please try again in a moment.", icon=":material/error:")
+            render_roster_view(roster, weekly_contexts, opportunities, profiles)
+        with st.container(border=True):
+            st.markdown("**FanEdge analysis**")
+            st.caption("FanEdge analyzed your roster and evidence. AI can explain the decisions; it does not source additional sports facts.")
+            if st.button("Generate weekly strategy", type="primary", width="stretch", disabled=not has_openai_key, key="strategy_button"):
+                try:
+                    with st.spinner("Summarizing the decisions that matter…", show_time=True):
+                        st.session_state.strategy = generate_strategy(
+                            roster,
+                            league,
+                            nfl_state=nfl_state,
+                            weekly_contexts=weekly_contexts,
+                        )
+                except Exception:
+                    st.error("We couldn’t build your strategy right now. Please try again in a moment.", icon=":material/error:")
         if not has_openai_key:
             st.html(
                 '<div class="fe-ai-unavailable"><strong>AI STRATEGY UNAVAILABLE</strong>'

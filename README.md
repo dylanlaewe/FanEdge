@@ -48,6 +48,12 @@ flowchart LR
 - `matchup.py` calculates completed-game fantasy points allowed by defense and offensive position under the selected league's scoring.
 - `intelligence.py` normalizes historical baselines, participation, roles, evidence quality, and same-position teammate availability changes.
 
+## Product experience
+
+The connected experience is organized around four weekly jobs: **Overview**, **Lineup**, **Waivers**, and **Roster**. Overview is a compact briefing with lineup decisions, injury watches, and waiver targets. Lineup gives evidence-backed swaps or a reassuring no-change state. Waivers separates higher-priority adds from lower-confidence watchlist signals. Roster remains a reference view with matchup, schedule, opportunity, role, and snap-share details.
+
+The dashboard intentionally computes the intelligence batch once, then lets the user move between views without per-player HTTP calls. Missing or unsupported data is shown as an explicit limitation; it is never converted into a negative recommendation.
+
 ## Schedule integrity
 
 Schedule context has three explicit states: `SCHEDULED`, `BYE`, and `UNKNOWN`. Missing a game is never sufficient evidence for a bye. nflverse and Sleeper team IDs are normalized through a centralized, deterministic alias table—for example, nflverse `LA` becomes canonical `LAR`.
