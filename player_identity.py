@@ -25,6 +25,7 @@ class PlayerIdentity:
     sleeper_id: str
     gsis_id: str | None
     pfr_id: str | None
+    espn_id: str | None
     full_name: str
     normalized_name: str
     position: str
@@ -71,7 +72,7 @@ class PlayerIdentityResolver:
 
         if position == "DEF" and team:
             return PlayerIdentity(
-                str(sleeper_id), None, None, name or team, normalized,
+                str(sleeper_id), None, None, None, name or team, normalized,
                 position, team, "team_defense",
             )
 
@@ -98,6 +99,7 @@ class PlayerIdentityResolver:
             sleeper_id=str(sleeper_id),
             gsis_id=str(match.get("gsis_id")) if match and match.get("gsis_id") else None,
             pfr_id=str(match.get("pfr_id")) if match and match.get("pfr_id") else None,
+            espn_id=str(match.get("espn_id")) if match and match.get("espn_id") else None,
             full_name=name,
             normalized_name=normalized,
             position=position,
