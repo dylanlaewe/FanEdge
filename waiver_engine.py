@@ -7,6 +7,8 @@ from typing import Any, Iterable
 
 from football_data import PlayerWeeklyContext
 from sleeper_api import Player, Roster
+from intelligence import RoleProfile
+from opportunity import PlayerOpportunity
 
 
 SKILL_POSITIONS = ("QB", "RB", "WR", "TE")
@@ -35,6 +37,7 @@ class WaiverCandidate:
     context: PlayerWeeklyContext
     score: float
     reasons: tuple[str, ...]
+    intelligence: RoleProfile | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -42,6 +45,7 @@ class WaiverCandidate:
             "weekly": self.context.to_dict(),
             "score": self.score,
             "reasons": list(self.reasons),
+            "intelligence": self.intelligence.to_dict() if self.intelligence else None,
         }
 
 
@@ -146,7 +150,10 @@ def rank_waiver_candidates(
     needs: RosterNeeds,
     *,
     limit: int = 8,
+    opportunities: dict[str, PlayerOpportunity] | None = None,
+    profiles: dict[str, RoleProfile] | None = None,
 ) -> list[WaiverCandidate]:
+    opportunities, profiles = opportunities or {}, profiles or {}
     ranked: list[WaiverCandidate] = []
     for player in players:
         context = contexts.get(player.player_id)
@@ -159,13 +166,32 @@ def rank_waiver_candidates(
             reasons.append("Injury coverage")
         if needs.bye_pressure.get(player.position, 0):
             reasons.append("Bye coverage")
+        profile, opportunity = profiles.get(player.player_id), opportunities.get(player.player_id)
         if context.season_stats:
             reasons.append("Recent production")
             if context.season_stats.trend == "up":
                 reasons.append("Trending up")
         if not reasons:
             reasons.append("Available in your league")
-        ranked.append(WaiverCandidate(player, context, _candidate_score(context, player.position, needs), tuple(reasons[:3])))
+        intelligence_score = 0.0
+        if profile:
+            if profile.role_trend == "ROLE EXPANDING": reasons.insert(0, "Role expanding"); intelligence_score += 3
+            if profile.participation and profile.participation.trend == "ROLE EXPANDING": reasons.insert(0, "Snap share rising"); intelligence_score += 2
+            if profile.teammate_changes: reasons.append("Teammate unavailable"); intelligence_score += 1.5
+        if opportunity and opportunity.usage_trend == "RISING": reasons.insert(0, "Opportunity rising"); intelligence_score += 3
+        # Early fantasy output earns only its evidence-weighted share; usage can surface first.
+        base = _candidate_score(context, player.position, needs)
+        if opportunity:
+            workload = opportunity.recent_attempts if player.position == "QB" else opportunity.recent_touches if player.position == "RB" else opportunity.recent_targets
+            minimum = 15 if player.position == "QB" else 6 if player.position == "RB" else 3
+            if workload is not None and workload < minimum:
+                base *= .45
+                reasons = [reason for reason in reasons if reason != "Recent production"]
+                reasons.append("Production lacks usage support")
+        if profile and context.season_stats and profile.current_games < 4:
+            need_component = 2.0 if player.position in needs.shallow_depth_positions else 0.0
+            base = base * profile.current_weight + need_component * (1-profile.current_weight)
+        ranked.append(WaiverCandidate(player, context, round(base + intelligence_score, 2), tuple(dict.fromkeys(reasons))[:3], profile))
     ranked.sort(key=lambda item: (
         -item.score,
         -(item.context.season_stats.recent_average if item.context.season_stats else -1),

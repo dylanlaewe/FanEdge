@@ -17,6 +17,7 @@ FanEdge is an AI-powered fantasy football strategist for real Sleeper leagues. I
 - Generates optional waiver explanations from only the deterministic shortlist and conservative bench-only drop candidates
 - Models the league's actual starting slots, including flex and superflex eligibility, and checks the current lineup for material bench challenges
 - Adds completed-game opportunity context: attempts, carries, targets, receptions, touches, and conservative usage trends
+- Blends prior-season baselines with current evidence, adds offensive snap participation, deterministic roles, role trends, and weekly teammate-availability changes
 - Handles missing users, leagues, rosters, player metadata, API failures, and missing AI configuration
 - Caches read-heavy Sleeper data for a responsive experience
 
@@ -45,6 +46,7 @@ flowchart LR
 - `lineup_optimizer.py` normalizes Sleeper lineup slots and solves a deterministic one-to-one starter/bench assignment.
 - `team_identity.py` maps explicit provider aliases to one of 32 canonical current NFL team IDs.
 - `matchup.py` calculates completed-game fantasy points allowed by defense and offensive position under the selected league's scoring.
+- `intelligence.py` normalizes historical baselines, participation, roles, evidence quality, and same-position teammate availability changes.
 
 ## Schedule integrity
 
@@ -54,7 +56,7 @@ Before FanEdge infers a bye, the target weekly schedule must contain 12–16 val
 
 ## Waiver ranking
 
-Only active, well-formed QB/RB/WR/TE records not found in any league roster container enter the candidate pool. FanEdge calculates a score from 60% recent and 40% season fantasy average, discounted for samples under four games. It then applies small, documented adjustments for trend, shallow positional depth, injury/bye pressure, and the player's availability status. Missing performance remains unknown rather than zero; those candidates can still appear when provider statistics or custom scoring are unavailable. Results use stable name/ID tie-breakers and are capped at three players per position.
+Only active, well-formed QB/RB/WR/TE records not found in any league roster container enter the candidate pool. Early production is discounted by the same current-evidence weight used by the lineup engine. Rising opportunity, expanding role, rising snap share, and factual same-position teammate unavailability can lift a candidate before fantasy points catch up; a touchdown-driven game without workload support cannot dominate the score. Roster fit, injury/bye pressure, and availability remain explicit adjustments. Missing performance remains unknown rather than zero. Results use stable name/ID tie-breakers and are capped at three players per position.
 
 Drop candidates are limited to the user's bench, require at least two completed games, exclude injured stashes, and are omitted when the position is already shallow. They are options for AI explanation—not automatic drop instructions.
 
@@ -62,15 +64,19 @@ Drop candidates are limited to the user's bench, require at least two completed 
 
 FanEdge reads the league's real `roster_positions` rather than assuming a standard lineup. Each duplicate slot remains independent, with explicit eligibility for FLEX, WR/RB flex, receiver flex, superflex, K, and DEF.
 
-The comparison signal combines completed-game fantasy production, position-aware opportunity volume, sample size, usage trend, injury status, and verified byes. It is not a projection and does not apply an unsupported matchup-strength adjustment. Differences under 2 points retain the current starter automatically; 2–3.99 is a close call, 4–7.99 is consider swap, and 8+ is strong swap. Close calls require at least two games for both players. Out/IR/PUP and verified-bye starters receive a safety penalty only when a healthy, eligible replacement exists. A dynamic-programming assignment maximizes the total evidence-backed improvement while ensuring one bench player fills at most one slot.
+The comparison signal combines completed-game fantasy production, historical baseline, position-aware opportunity, offensive snap share, role/role trend, current availability, verified byes, and league-scored matchup evidence. It is an inspectable comparison—not a projection. Differences under 2 points retain the current starter automatically; 2–3.99 is a close call, 4–7.99 is consider swap, and 8+ is strong swap. In a one-game sample, a recommendation requires corroboration from history, participation, role, availability, or injury, and a nominal strong swap is capped at consider. Out/IR/PUP and verified-bye starters retain their safety handling. A dynamic-programming assignment maximizes total evidence-backed improvement while ensuring one bench player fills at most one slot.
 
-Usage trend requires four completed games. It compares the most recent two-game position-specific workload average with the preceding-game average using a threshold of the larger of 1.5 opportunities or 20%. One-game starts remain `INSUFFICIENT DATA`. The current nflverse weekly dataset reliably supplies QB attempts/completions/rushes, RB carries/targets/receptions, and WR/TE targets/receptions. Broad snap share and route participation are intentionally omitted because they are not consistently present in that source.
+Current evidence receives 25% weight per completed game: 25% after one, 50% after two, 75% after three, and 100% at four. The remainder is a prior-season baseline when one exists. A team change halves the remaining historical influence. This is a confidence blend, not a point projection. Rookies and players without history use current evidence at low quality rather than receiving invented priors.
+
+Usage and participation trends require four completed games. Opportunity compares the latest two-game position-specific workload with the preceding games using the larger of 1.5 opportunities or 20%. Snap trend uses a 12-percentage-point threshold. One-to-three-game trends remain `INSUFFICIENT DATA`. nflverse weekly stats supply attempts, carries, targets, receptions, and derived touches. Its snap-count release supplies offensive snaps and offensive snap percentage. Routes and route participation are not present consistently and remain null.
+
+Role thresholds are position-specific and intentionally coarse. QB volume bands are 28/18/8 attempts; RB bands are 18/11/6 touches; WR bands are 8/5/3 targets; TE bands are 7/4/2 targets. A 75%/55%/30% snap share can independently support featured/starter/rotational status. With four games, an expanding lower-volume role becomes `EMERGING`; a shrinking non-limited role becomes `DECLINING`. Production trend is kept separate from role trend.
 
 Every lineup decision now retains structured evidence, deterministic reason codes, and provenance. Evidence confidence is `LOW`, `MODERATE`, or `HIGH`, based on performance/usage coverage, sample size, identity resolution, decision magnitude, and verified injury/bye evidence. It is not an outcome probability. One-game evidence is capped at moderate confidence.
 
-Matchup labels use completed games only. FanEdge aggregates league-scored points conceded by defense, position, and week, then compares each defense's per-game value with the league-wide defense-game average for that position. Four games are required: at least 15% above league average is `FAVORABLE`, at least 15% below is `DIFFICULT`, and the rest is `NEUTRAL`; smaller samples are `INSUFFICIENT DATA` and do not affect recommendations.
+Matchup labels aggregate league-scored points conceded by defense, position, and week. Before four current games, the current average receives 25% weight per game and the prior season supplies the remainder. At four games it becomes fully current. At least four combined defense-games are required; at least 15% above league average is `FAVORABLE`, at least 15% below is `DIFFICULT`, and the rest is `NEUTRAL`. Every value is marked `HISTORICAL`, `MIXED`, or `CURRENT`.
 
-nflverse publishes weekly depth charts, injuries, snap counts, and play participation, but these sources have different refresh schedules, identity requirements, and—in the case of depth charts—a recently changed schema. M4.1 does not infer teammate-driven role changes from them. A future role layer should normalize those datasets separately, validate current-season completeness, and require an explicit teammate availability-to-opportunity relationship before producing role evidence.
+Weekly nflverse injury reports are compared by GSIS player, team, and position. FanEdge records a factual previous/current status only when a same-position teammate becomes unavailable; it never claims the remaining player inherits that workload. The 2026 depth-chart release is a 51 MB current snapshot with a recently changed schema and no trustworthy prior snapshot in the release. M5 therefore omits depth-chart-rise/fall claims and does not load that file in the app. Current rank parsing exists for a future validated snapshot history, but it does not affect recommendations today.
 
 No database or authentication is used in this MVP.
 

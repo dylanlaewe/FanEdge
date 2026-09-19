@@ -24,6 +24,10 @@ from football_data import (
 from lineup_optimizer import LineupDecision, build_current_lineup, optimize_lineup
 from matchup import DefenseVsPosition, build_defense_vs_position
 from opportunity import PlayerOpportunity, build_opportunity_index, build_player_opportunities
+from intelligence import (
+    build_availability_changes, build_historical_index,
+    build_participation_index, build_role_profiles,
+)
 from sleeper_api import Roster, SleeperAPIError, SleeperClient, build_roster, find_user_roster
 from player_identity import PlayerIdentity, PlayerIdentityResolver
 from strategy_engine import generate_lineup_advice, generate_strategy, generate_waiver_advice
@@ -108,12 +112,19 @@ def cached_weekly_schedule(state: NFLState) -> WeeklySchedule:
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
-def cached_weekly_indexes(state: NFLState, scoring: dict[str, Any]) -> tuple[dict[Any, Any], dict[Any, Any], dict[tuple[str, str], DefenseVsPosition]]:
-    rows = NflverseClient().get_stat_rows(state.season)
+def cached_weekly_indexes(state: NFLState, scoring: dict[str, Any]) -> tuple[Any, ...]:
+    client = NflverseClient()
+    rows = client.get_stat_rows(state.season)
+    prior_rows = client.get_stat_rows(state.season - 1)
     return (
         build_performance_index(rows, state, scoring),
         build_opportunity_index(rows, state),
-        build_defense_vs_position(rows, state, scoring),
+        build_defense_vs_position(rows, state, scoring, prior_rows),
+        build_historical_index(prior_rows, state.season - 1, scoring),
+        build_participation_index(client.get_snap_rows(state.season), state),
+        build_participation_index(client.get_snap_rows(state.season - 1), NFLState(state.season - 1, 99, "regular")),
+        build_availability_changes(client.get_injury_rows(state.season), state),
+        {},  # Current-only 51 MB depth chart is not loaded: no trustworthy change history.
     )
 
 
@@ -234,9 +245,17 @@ def render_lineup_check(decisions: list[LineupDecision], health: Any) -> None:
             st.caption(f"Evidence confidence: {decision.confidence} — not an outcome probability.")
             if decision.evidence:
                 st.caption(f"Reason codes: {', '.join(decision.reason_codes)}")
-                for item in decision.evidence:
-                    st.markdown(f"**{item.label}**  \n{item.factual_value} {item.comparison}")
-                    st.caption(f"Source: {item.source_type}")
+                if "SMALL_SAMPLE_WARNING" in decision.reason_codes:
+                    st.warning("Limited sample — only one current-season game may be available, so this recommendation is intentionally conservative.", icon=":material/warning:")
+                groups: dict[str, list[Any]] = {}
+                for item in decision.evidence: groups.setdefault(item.category, []).append(item)
+                order = ("OPPORTUNITY", "PARTICIPATION", "ROLE", "MATCHUP", "AVAILABILITY", "INJURY", "BYE", "CONTEXT", "PRODUCTION", "USAGE_TREND")
+                for category in order:
+                    if category not in groups: continue
+                    st.markdown(f"**{category.replace('_', ' ')}**")
+                    for item in groups[category]:
+                        st.markdown(f"{item.label}: {item.factual_value} {item.comparison}")
+                        st.caption(f"Source: {item.source_type}")
             else:
                 st.caption("No additional structured evidence is available.")
 
@@ -330,13 +349,15 @@ else:
         performances: dict[Any, Any] = {}
         opportunity_index: dict[Any, Any] = {}
         matchup_index: dict[tuple[str, str], DefenseVsPosition] = {}
+        historical_index: dict[Any, Any] = {}; participation_index: dict[Any, Any] = {}
+        historical_participation: dict[Any, Any] = {}; availability_index: dict[Any, Any] = {}; depth_ranks: dict[str, int] = {}
         if nfl_state:
             try:
                 schedule = cached_weekly_schedule(nfl_state)
             except FootballDataError:
                 pass
             try:
-                performances, opportunity_index, matchup_index = cached_weekly_indexes(nfl_state, league.get("scoring_settings") or {})
+                performances, opportunity_index, matchup_index, historical_index, participation_index, historical_participation, availability_index, depth_ranks = cached_weekly_indexes(nfl_state, league.get("scoring_settings") or {})
             except FootballDataError:
                 pass
         try:
@@ -353,6 +374,7 @@ else:
         opportunities = build_player_opportunities(
             (*roster.starters, *roster.bench), opportunity_index, identities
         )
+        profiles = build_role_profiles((*roster.starters, *roster.bench), opportunities, identities, historical_index, participation_index, availability_index, depth_ranks, historical_participation)
         st.html(
             f'<div class="fe-roster-title"><div><div class="fe-eyebrow">TEAM SHEET</div>'
             f'<h2>My roster</h2></div><div class="fe-count">{len(roster.starters) + len(roster.bench)} TOTAL</div></div>'
@@ -370,6 +392,7 @@ else:
             opportunities,
             matchup_index,
             {player_id: bool(identity.gsis_id) for player_id, identity in identities.items()},
+            profiles,
         )
         render_lineup_check(lineup_decisions, lineup_health)
         has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
@@ -377,7 +400,7 @@ else:
             try:
                 with st.spinner("Reviewing your lineup…", show_time=True):
                     st.session_state.lineup_advice = generate_lineup_advice(
-                        lineup_slots, lineup_decisions, weekly_contexts, opportunities
+                        lineup_slots, lineup_decisions, weekly_contexts, opportunities, profiles
                     )
             except Exception:
                 st.error("We couldn’t explain the lineup decisions right now.", icon=":material/error:")
@@ -394,7 +417,9 @@ else:
             identities=identities,
         )
         roster_needs = analyze_roster_needs(roster, weekly_contexts)
-        waiver_candidates = rank_waiver_candidates(available_players, available_contexts, roster_needs)
+        available_opportunities = build_player_opportunities(available_players, opportunity_index, identities)
+        available_profiles = build_role_profiles(available_players, available_opportunities, identities, historical_index, participation_index, availability_index, depth_ranks, historical_participation)
+        waiver_candidates = rank_waiver_candidates(available_players, available_contexts, roster_needs, opportunities=available_opportunities, profiles=available_profiles)
         drop_candidates = find_drop_candidates(roster, weekly_contexts, roster_needs)
         st.html(
             '<section class="fe-waiver"><div class="fe-waiver-head"><div><div class="fe-eyebrow">LEAGUE-AWARE</div>'

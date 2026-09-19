@@ -2,6 +2,7 @@ from football_data import PerformanceSummary, PlayerWeeklyContext
 from lineup_optimizer import build_current_lineup, normalize_lineup_slots, optimize_lineup
 from opportunity import PlayerOpportunity
 from sleeper_api import Player, Roster
+from intelligence import HistoricalBaseline, RoleProfile
 
 
 def weekly(player, avg, *, status=None, bye=False, games=4):
@@ -133,3 +134,29 @@ def test_confidence_falls_when_evidence_is_weak():
     )[0][0]
     assert weak.confidence == "MODERATE"
     assert strong.confidence == "HIGH"
+
+
+def test_one_game_spike_requires_corroboration_with_v2_profiles():
+    starter, bench = Player("s", "Established", "WR", "A"), Player("b", "Spike", "WR", "B")
+    slots = build_current_lineup({"starters": ["s"]}, {"s": {"full_name": "Established", "position": "WR", "team": "A"}}, ["WR"])
+    contexts = {"s": weekly(starter, 4, games=1), "b": weekly(bench, 24, games=1)}
+    profiles = {
+        "s": RoleProfile("STARTER", "INSUFFICIENT DATA", "MODERATE", 1, .25, HistoricalBaseline(2025, 16, 13, 7, None, None, team="A"), None),
+        "b": RoleProfile("FEATURED", "INSUFFICIENT DATA", "LOW", 1, .25, None, None),
+    }
+    decisions, _ = optimize_lineup(slots, Roster([starter], [bench]), contexts, {}, profiles=profiles)
+    assert decisions == []
+
+
+def test_historical_advantage_corroborates_early_close_call():
+    starter, bench = Player("s", "Starter", "QB", "A"), Player("b", "Veteran", "QB", "B")
+    slots = build_current_lineup({"starters": ["s"]}, {"s": {"full_name": "Starter", "position": "QB", "team": "A"}}, ["QB"])
+    contexts = {"s": weekly(starter, 8, games=1), "b": weekly(bench, 20, games=1)}
+    profiles = {
+        "s": RoleProfile("STARTER", "INSUFFICIENT DATA", "MODERATE", 1, .25, HistoricalBaseline(2025, 16, 12, None, None, 25, team="A"), None),
+        "b": RoleProfile("STARTER", "INSUFFICIENT DATA", "MODERATE", 1, .25, HistoricalBaseline(2025, 16, 20, None, None, 32, team="B"), None),
+    }
+    decisions, _ = optimize_lineup(slots, Roster([starter], [bench]), contexts, {}, profiles=profiles)
+    assert decisions
+    assert "HISTORICAL_BASELINE_ADVANTAGE" in decisions[0].reason_codes
+    assert decisions[0].label != "STRONG SWAP"

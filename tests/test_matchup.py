@@ -28,6 +28,18 @@ def test_matchup_labels_and_league_average():
     assert result[("MIA", "WR")].label == "DIFFICULT"
     assert result[("NE", "WR")].label == "NEUTRAL"
     assert result[("DAL", "WR")].label == "INSUFFICIENT DATA"
+
+
+def test_early_season_blends_history_then_transitions_current():
+    current = [{"season":"2026","week":"1","season_type":"REG","position":"WR","opponent_team":"BUF","receiving_yards":"200"}]
+    prior = [{"season":"2025","week":str(i),"season_type":"REG","position":"WR","opponent_team":"BUF","receiving_yards":"40"} for i in range(1,5)]
+    prior += [{"season":"2025","week":str(i),"season_type":"REG","position":"WR","opponent_team":"MIA","receiving_yards":"100"} for i in range(1,5)]
+    result = build_defense_vs_position(current, NFLState(2026,2,"regular"), {"rec_yd":.1}, prior)
+    assert result[("BUF","WR")].evidence_basis == "MIXED"
+    assert result[("BUF","WR")].current_games == 1
+    current = [{**current[0], "week": str(i)} for i in range(1,5)]
+    result = build_defense_vs_position(current, NFLState(2026,5,"regular"), {"rec_yd":.1}, prior)
+    assert result[("BUF","WR")].evidence_basis == "CURRENT"
     assert result[("BUF", "WR")].league_average > 0
 
 

@@ -15,6 +15,7 @@ from sleeper_api import Roster
 from waiver_engine import DropCandidate, RosterNeeds, WaiverCandidate
 from lineup_optimizer import LineupDecision, LineupSlot
 from opportunity import PlayerOpportunity
+from intelligence import RoleProfile
 
 
 SYSTEM_PROMPT = """You are FanEdge, an expert fantasy football strategist. Analyze the supplied fantasy roster, league, and weekly context. Be decisive, concise, and data-aware.
@@ -35,7 +36,7 @@ WAIVER_LABELS = ("TOP ADD", "ADD/DROP", "WATCHLIST")
 WAIVER_SYSTEM_PROMPT = """You are FanEdge's waiver analyst. Use ONLY the supplied JSON facts. Sleeper ownership is authoritative: discuss only the candidates provided. Never invent availability, statistics, projections, injuries, matchups, or news. Treat drop candidates as cautious options, not commands.
 
 Return EXACTLY 3 concise recommendations labeled TOP ADD, ADD/DROP, and WATCHLIST. Explain the factual tradeoff behind each. If a drop is not justified, say so. Keep the complete response under 170 words."""
-LINEUP_SYSTEM_PROMPT = """You are FanEdge's lineup analyst. Explain ONLY the deterministic lineup decisions and evidence supplied in JSON. Never invent projections, statistics, injuries, matchup strength, news, weather, teammate injuries, snap counts, routes, or depth-chart changes. A matchup claim is allowed only when a MATCHUP evidence item exists. Do not introduce players, swaps, reasons, or role changes absent from the supplied decisions.
+LINEUP_SYSTEM_PROMPT = """You are FanEdge's lineup analyst. Explain ONLY the deterministic lineup decisions and evidence supplied in JSON. Never invent projections, statistics, injuries, matchup strength, news, weather, teammate injuries, snap counts, routes, or depth-chart changes. A matchup claim is allowed only when a MATCHUP evidence item exists. Do not introduce players, swaps, reasons, or role changes absent from the supplied decisions. Explain why the recommendation exists, which evidence matters most, and what uncertainty remains.
 
 Return concise prose under 170 words. Preserve each deterministic decision label and explain the supplied factual reasons. If no decisions are supplied, say the current lineup has no material evidence-backed challenge."""
 
@@ -155,14 +156,15 @@ def build_lineup_context(
     decisions: list[LineupDecision],
     weekly_contexts: dict[str, PlayerWeeklyContext],
     opportunities: dict[str, PlayerOpportunity],
+    profiles: dict[str, RoleProfile] | None = None,
 ) -> dict[str, Any]:
     return {
         "lineup_slots": [
             {"slot_id": slot.slot_id, "slot_type": slot.slot_type, "eligible_positions": list(slot.eligible_positions)}
             for slot in slots
         ],
-        "deterministic_decisions": [decision.to_dict(weekly_contexts, opportunities) for decision in decisions],
-        "data_limits": "Only evidence arrays support factual claims. No projections, news, weather, teammate injuries, snap counts, routes, or depth-chart changes are supplied.",
+        "deterministic_decisions": [decision.to_dict(weekly_contexts, opportunities, profiles) for decision in decisions],
+        "data_limits": "Only supplied evidence supports factual claims. Historical data is a baseline, not a projection. Null routes and route participation are unavailable, not zero. Depth-chart rank is current-only; no depth-chart change is inferred.",
     }
 
 
@@ -171,6 +173,7 @@ def generate_lineup_advice(
     decisions: list[LineupDecision],
     weekly_contexts: dict[str, PlayerWeeklyContext],
     opportunities: dict[str, PlayerOpportunity],
+    profiles: dict[str, RoleProfile] | None = None,
     *,
     api_key: str | None = None,
     model: str = "gpt-4o-mini",
@@ -178,7 +181,7 @@ def generate_lineup_advice(
     key = api_key or os.getenv("OPENAI_API_KEY")
     if not key:
         raise ValueError("OPENAI_API_KEY is not configured.")
-    context = build_lineup_context(slots, decisions, weekly_contexts, opportunities)
+    context = build_lineup_context(slots, decisions, weekly_contexts, opportunities, profiles)
     response = OpenAI(api_key=key).responses.create(
         model=model,
         instructions=LINEUP_SYSTEM_PROMPT,

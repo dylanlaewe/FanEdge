@@ -20,6 +20,9 @@ from team_identity import NFL_TEAMS, normalize_team_id
 
 SCHEDULE_URL = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv"
 STATS_URL = "https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{season}.csv.gz"
+SNAPS_URL = "https://github.com/nflverse/nflverse-data/releases/download/snap_counts/snap_counts_{season}.csv.gz"
+INJURIES_URL = "https://github.com/nflverse/nflverse-data/releases/download/injuries/injuries_{season}.csv"
+DEPTH_CHART_URL = "https://github.com/nflverse/nflverse-data/releases/download/depth_charts/depth_charts_{season}.csv"
 PLAYERS_URL = "https://github.com/nflverse/nflverse-data/releases/download/players/players.csv"
 EASTERN = ZoneInfo("America/New_York")
 SEASON_TYPES = {"pre": "PRE", "regular": "REG", "post": "POST"}
@@ -152,6 +155,21 @@ class NflverseClient:
 
     def get_player_rows(self) -> list[dict[str, str]]:
         content = self._get(PLAYERS_URL).decode("utf-8-sig")
+        return list(csv.DictReader(io.StringIO(content)))
+
+    def get_snap_rows(self, season: int) -> list[dict[str, str]]:
+        try:
+            content = gzip.decompress(self._get(SNAPS_URL.format(season=season))).decode("utf-8-sig")
+        except (gzip.BadGzipFile, UnicodeDecodeError) as exc:
+            raise FootballDataError("Snap-count data was unreadable.") from exc
+        return list(csv.DictReader(io.StringIO(content)))
+
+    def get_injury_rows(self, season: int) -> list[dict[str, str]]:
+        content = self._get(INJURIES_URL.format(season=season)).decode("utf-8-sig")
+        return list(csv.DictReader(io.StringIO(content)))
+
+    def get_depth_chart_rows(self, season: int) -> list[dict[str, str]]:
+        content = self._get(DEPTH_CHART_URL.format(season=season)).decode("utf-8-sig")
         return list(csv.DictReader(io.StringIO(content)))
 
 

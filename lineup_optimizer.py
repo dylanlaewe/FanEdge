@@ -10,6 +10,7 @@ from typing import Any
 from football_data import PlayerWeeklyContext
 from matchup import DefenseVsPosition
 from opportunity import PlayerOpportunity
+from intelligence import RoleProfile
 from sleeper_api import Player, Roster
 
 
@@ -32,6 +33,13 @@ class ReasonCode(StrEnum):
     BENCH_PLAYER_HEALTHIER = "BENCH_PLAYER_HEALTHIER"
     STARTER_BYE = "STARTER_BYE"
     FAVORABLE_MATCHUP = "FAVORABLE_MATCHUP"
+    DIFFICULT_MATCHUP = "DIFFICULT_MATCHUP"
+    ROLE_EXPANDING = "ROLE_EXPANDING"
+    ROLE_SHRINKING = "ROLE_SHRINKING"
+    HIGHER_SNAP_SHARE = "HIGHER_SNAP_SHARE"
+    TEAMMATE_UNAVAILABLE = "TEAMMATE_UNAVAILABLE"
+    HISTORICAL_BASELINE_ADVANTAGE = "HISTORICAL_BASELINE_ADVANTAGE"
+    SMALL_SAMPLE_WARNING = "SMALL_SAMPLE_WARNING"
 
 
 @dataclass(frozen=True)
@@ -67,7 +75,7 @@ class LineupDecision:
     evidence: tuple[DecisionEvidence, ...] = ()
     confidence: str = "LOW"
 
-    def to_dict(self, contexts: dict[str, PlayerWeeklyContext], opportunities: dict[str, PlayerOpportunity]) -> dict[str, Any]:
+    def to_dict(self, contexts: dict[str, PlayerWeeklyContext], opportunities: dict[str, PlayerOpportunity], profiles: dict[str, RoleProfile] | None = None) -> dict[str, Any]:
         def player_data(player: Player | None) -> dict[str, Any] | None:
             if not player:
                 return None
@@ -76,6 +84,7 @@ class LineupDecision:
                 **asdict(player),
                 "weekly": context.to_dict() if context else None,
                 "opportunity": opportunities[player.player_id].to_dict() if player.player_id in opportunities else None,
+                "intelligence": (profiles or {}).get(player.player_id).to_dict() if player.player_id in (profiles or {}) else None,
             }
         return {
             "slot_id": self.slot_id, "slot_type": self.slot_type,
@@ -132,15 +141,17 @@ def _usage_value(player: Player, opportunity: PlayerOpportunity | None) -> float
 
 def comparison_score(
     player: Player, context: PlayerWeeklyContext | None, opportunity: PlayerOpportunity | None,
-    matchup: DefenseVsPosition | None = None,
+    matchup: DefenseVsPosition | None = None, profile: RoleProfile | None = None,
 ) -> float:
     if not context:
         return 0.0
     summary = context.season_stats
     production = 0.0
     if summary:
-        confidence = min(1.0, 0.6 + 0.1 * summary.games_played)
-        production = ((0.65 * summary.recent_average) + (0.35 * summary.season_average)) * confidence
+        current = (0.65 * summary.recent_average) + (0.35 * summary.season_average)
+        weight = profile.current_weight if profile else min(1.0, summary.games_played / 4)
+        historical = profile.historical.points_per_game if profile and profile.historical and profile.historical.points_per_game is not None else current
+        production = current * weight + historical * (1-weight)
     usage = _usage_value(player, opportunity)
     usage_trend = 1.5 if opportunity and opportunity.usage_trend == "RISING" else -1.5 if opportunity and opportunity.usage_trend == "FALLING" else 0.0
     status = str(context.status or "").lower()
@@ -148,7 +159,9 @@ def comparison_score(
     if context.is_bye:
         availability = -100.0
     matchup_adjustment = 2.0 if matchup and matchup.label == "FAVORABLE" else -2.0 if matchup and matchup.label == "DIFFICULT" else 0.0
-    return round(production + usage + usage_trend + availability + matchup_adjustment, 2)
+    role = 1.5 if profile and profile.role_trend == "ROLE EXPANDING" else -1.5 if profile and profile.role_trend == "ROLE SHRINKING" else 0.0
+    snap = (profile.participation.recent_snap_share or 0) * 2 if profile and profile.participation else 0.0
+    return round(production + usage + usage_trend + role + snap + availability + matchup_adjustment, 2)
 
 
 def _matchup_for(player: Player, context: PlayerWeeklyContext | None, matchups: dict[tuple[str, str], DefenseVsPosition]) -> DefenseVsPosition | None:
@@ -159,6 +172,7 @@ def _decision_evidence(
     starter: Player | None, challenger: Player,
     contexts: dict[str, PlayerWeeklyContext], opportunities: dict[str, PlayerOpportunity],
     matchups: dict[tuple[str, str], DefenseVsPosition],
+    profiles: dict[str, RoleProfile] | None = None,
 ) -> tuple[tuple[str, ...], tuple[DecisionEvidence, ...]]:
     codes: list[str] = []
     evidence: list[DecisionEvidence] = []
@@ -175,6 +189,9 @@ def _decision_evidence(
             evidence.append(DecisionEvidence("PRODUCTION", "Higher season production", f"{challenger_summary.season_average:.1f} points/game", f"vs {starter_summary.season_average:.1f}", "nflverse player stats + league scoring"))
     starter_opp = opportunities.get(starter.player_id) if starter else None
     challenger_opp = opportunities.get(challenger.player_id)
+    profiles = profiles or {}
+    starter_profile = profiles.get(starter.player_id) if starter else None
+    challenger_profile = profiles.get(challenger.player_id)
     if starter and starter.position == challenger.position and starter_opp and challenger_opp:
         if challenger.position == "RB" and (challenger_opp.recent_touches or 0) - (starter_opp.recent_touches or 0) >= 1.5:
             codes.append(ReasonCode.MORE_TOUCHES.value)
@@ -188,6 +205,25 @@ def _decision_evidence(
     if challenger_opp and challenger_opp.usage_trend == "RISING":
         codes.append(ReasonCode.RISING_USAGE.value)
         evidence.append(DecisionEvidence("USAGE_TREND", "Rising usage", "RISING", "four-game minimum satisfied", "derived by FanEdge"))
+    if challenger_profile and challenger_profile.role_trend == "ROLE EXPANDING":
+        codes.append(ReasonCode.ROLE_EXPANDING.value)
+        evidence.append(DecisionEvidence("ROLE", "Role expanding", challenger_profile.role, f"evidence quality: {challenger_profile.evidence_quality}", "FanEdge from nflverse opportunity + snaps"))
+    if starter_profile and starter_profile.role_trend == "ROLE SHRINKING":
+        codes.append(ReasonCode.ROLE_SHRINKING.value)
+        evidence.append(DecisionEvidence("ROLE", "Starter role shrinking", starter_profile.role, f"evidence quality: {starter_profile.evidence_quality}", "FanEdge from nflverse opportunity + snaps"))
+    if challenger_profile and challenger_profile.participation and (challenger_profile.participation.recent_snap_share or 0) - ((starter_profile.participation.recent_snap_share or 0) if starter_profile and starter_profile.participation else 0) >= .12:
+        codes.append(ReasonCode.HIGHER_SNAP_SHARE.value)
+        evidence.append(DecisionEvidence("PARTICIPATION", "Higher offensive snap share", f"{challenger_profile.participation.recent_snap_share:.0%}", "at least 12 points higher", "nflverse snap counts"))
+    if challenger_profile and challenger_profile.teammate_changes:
+        change = challenger_profile.teammate_changes[0]
+        codes.append(ReasonCode.TEAMMATE_UNAVAILABLE.value)
+        evidence.append(DecisionEvidence("AVAILABILITY", "Same-position teammate unavailable", f"{change.teammate}: {change.current_status}", "current weekly report", change.source))
+    if challenger_profile and starter_profile and challenger_profile.historical and starter_profile.historical and (challenger_profile.historical.points_per_game or 0) - (starter_profile.historical.points_per_game or 0) >= 2:
+        codes.append(ReasonCode.HISTORICAL_BASELINE_ADVANTAGE.value)
+        evidence.append(DecisionEvidence("CONTEXT", "Historical baseline advantage", f"{challenger_profile.historical.points_per_game:.1f} points/game", f"vs {starter_profile.historical.points_per_game:.1f}", "prior-season nflverse stats + league scoring"))
+    if (challenger_profile or starter_profile) and min(challenger_profile.current_games if challenger_profile else 0, starter_profile.current_games if starter_profile else 0) < 2:
+        codes.append(ReasonCode.SMALL_SAMPLE_WARNING.value)
+        evidence.append(DecisionEvidence("CONTEXT", "Limited sample", "One or fewer current-season games", "recommendation intentionally conservative", "FanEdge evidence-quality rules"))
     starter_status = str(starter_context.status or "").lower() if starter_context else ""
     challenger_status = str(challenger_context.status or "").lower() if challenger_context else ""
     if starter_context and starter_context.is_bye:
@@ -229,20 +265,23 @@ def optimize_lineup(
     contexts: dict[str, PlayerWeeklyContext], opportunities: dict[str, PlayerOpportunity],
     matchups: dict[tuple[str, str], DefenseVsPosition] | None = None,
     identity_resolved: dict[str, bool] | None = None,
+    profiles: dict[str, RoleProfile] | None = None,
 ) -> tuple[list[LineupDecision], LineupHealth]:
     matchups = matchups or {}
     identity_resolved = identity_resolved or {}
+    intelligence_enabled = profiles is not None
+    profiles = profiles or {}
     edges: list[tuple[float, str, str, LineupSlot, Player, tuple[str, ...]]] = []
     for slot in slots:
         starter_context = contexts.get(slot.current_player.player_id) if slot.current_player else None
-        starter_score = comparison_score(slot.current_player, starter_context, opportunities.get(slot.current_player.player_id), _matchup_for(slot.current_player, starter_context, matchups)) if slot.current_player else -100.0
+        starter_score = comparison_score(slot.current_player, starter_context, opportunities.get(slot.current_player.player_id), _matchup_for(slot.current_player, starter_context, matchups), profiles.get(slot.current_player.player_id)) if slot.current_player else -100.0
         for bench in roster.bench:
             if bench.position not in slot.eligible_positions:
                 continue
             context = contexts.get(bench.player_id)
             if not context or context.is_bye or str(context.status or "").lower() in {"out", "ir", "pup"}:
                 continue
-            challenger_score = comparison_score(bench, context, opportunities.get(bench.player_id), _matchup_for(bench, context, matchups))
+            challenger_score = comparison_score(bench, context, opportunities.get(bench.player_id), _matchup_for(bench, context, matchups), profiles.get(bench.player_id))
             difference = round(challenger_score - starter_score, 2)
             if difference < 2.0:
                 continue
@@ -250,6 +289,18 @@ def optimize_lineup(
             challenger_games = context.season_stats.games_played if context.season_stats else 0
             if difference < 4.0 and min(starter_games, challenger_games) < 2:
                 continue
+            if intelligence_enabled and min(starter_games, challenger_games) < 2 and slot.current_player:
+                challenger_profile = profiles.get(bench.player_id)
+                starter_profile = profiles.get(slot.current_player.player_id)
+                corroborated = bool(
+                    (challenger_profile and challenger_profile.role_trend == "ROLE EXPANDING")
+                    or (challenger_profile and challenger_profile.teammate_changes)
+                    or (challenger_profile and challenger_profile.participation and starter_profile and starter_profile.participation and (challenger_profile.participation.recent_snap_share or 0) - (starter_profile.participation.recent_snap_share or 0) >= .12)
+                    or (challenger_profile and starter_profile and challenger_profile.historical and starter_profile.historical and (challenger_profile.historical.points_per_game or 0) - (starter_profile.historical.points_per_game or 0) >= 2)
+                    or (starter_context and str(starter_context.status or "").lower() in {"out","ir","pup","doubtful"})
+                )
+                if not corroborated:
+                    continue
             reasons: list[str] = []
             starter_context = contexts.get(slot.current_player.player_id) if slot.current_player else None
             if not slot.current_player:
@@ -294,7 +345,9 @@ def optimize_lineup(
     decisions: list[LineupDecision] = []
     for difference, _, _, slot, bench, reasons in sorted(selected_edges, key=lambda edge: (-edge[0], edge[2])):
         label = "STRONG SWAP" if difference >= 8 else "CONSIDER SWAP" if difference >= 4 else "CLOSE CALL"
-        reason_codes, evidence = _decision_evidence(slot.current_player, bench, contexts, opportunities, matchups)
+        reason_codes, evidence = _decision_evidence(slot.current_player, bench, contexts, opportunities, matchups, profiles)
+        if intelligence_enabled and ReasonCode.SMALL_SAMPLE_WARNING.value in reason_codes and label == "STRONG SWAP":
+            label = "CONSIDER SWAP"
         evidence_reasons = tuple(item.label for item in evidence) or reasons
         confidence = _confidence(slot.current_player, bench, difference, contexts, opportunities, identity_resolved, evidence)
         decisions.append(LineupDecision(slot.slot_id, slot.slot_type, slot.current_player, bench, label, difference, evidence_reasons[:3], reason_codes, evidence, confidence))

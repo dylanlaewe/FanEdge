@@ -2,6 +2,8 @@ from datetime import datetime
 
 from football_data import GamePerformance, PerformanceSummary, PlayerWeeklyContext
 from sleeper_api import Player, Roster
+from intelligence import ParticipationSummary, RoleProfile
+from opportunity import PlayerOpportunity
 from waiver_engine import (
     analyze_roster_needs,
     build_available_players,
@@ -83,3 +85,22 @@ def test_drop_candidates_are_bench_only_conservative_and_evidence_backed():
     assert all(item.player.player_id != "s" for item in drops)
     assert all(item.player.player_id != "0" for item in drops)
     assert drops[0].player.player_id == "1"
+
+
+def test_usage_breakout_outranks_touchdown_spike_without_usage():
+    spike = Player("spike", "Touchdown Spike", "WR", "BUF")
+    breakout = Player("breakout", "Usage Breakout", "WR", "DAL")
+    needs = analyze_roster_needs(Roster([], []), {})
+    contexts = {"spike": context(spike, 20, 20), "breakout": context(breakout, 8, 8)}
+    opps = {
+        "spike": PlayerOpportunity(4,None,None,None,None,2,2,1,1,1,1,"STEADY"),
+        "breakout": PlayerOpportunity(4,None,None,None,None,9,11,6,7,6,7,"RISING"),
+    }
+    part = ParticipationSummary(4,.6,.75,40,52,None,None,None,"ROLE EXPANDING")
+    profiles = {
+        "spike": RoleProfile("LIMITED","ROLE STABLE","HIGH",4,1,None,None),
+        "breakout": RoleProfile("EMERGING","ROLE EXPANDING","HIGH",4,1,None,part),
+    }
+    ranked = rank_waiver_candidates([spike, breakout], contexts, needs, opportunities=opps, profiles=profiles)
+    assert ranked[0].player.player_id == "breakout"
+    assert "Opportunity rising" in ranked[0].reasons
