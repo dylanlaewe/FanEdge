@@ -206,7 +206,7 @@ def prompt_tiles(prompts: Iterable[str]) -> str:
     return '<div class="fe-prompt-grid">' + "".join(f'<div class="fe-prompt">{escape(prompt)}</div>' for prompt in prompts) + "</div>"
 
 
-def opportunity_card(item: Any, identity: PlayerIdentity | None) -> str:
+def opportunity_card(item: Any, identity: PlayerIdentity | None, *, lifecycle: str | None = None) -> str:
     player = item.subject_player
     category = {
         "INJURY_RISK": "RISK",
@@ -221,10 +221,11 @@ def opportunity_card(item: Any, identity: PlayerIdentity | None) -> str:
     subtitle = f"{player.position} · {player.team}" if player else "Team-level opportunity"
     facts = "".join(f'<li>{escape(fact)}</li>' for fact in item.explanation_context[:3])
     media = player_visual(identity, player.name, player.position, player.team, size="large") if player else '<span class="fe-edge-icon">FE</span>'
+    lifecycle_label = f'<em class="fe-lifecycle {escape(lifecycle.lower())}">{escape(lifecycle)}</em>' if lifecycle else ""
     return (
         f'<article class="fe-edge-card priority-{escape(item.priority.lower())}">'
         f'<div class="fe-edge-media">{media}</div><div class="fe-edge-main">'
-        f'<div class="fe-edge-meta"><span>{escape(category)}</span><b>{escape(item.priority)} PRIORITY</b></div>'
+        f'<div class="fe-edge-meta">{lifecycle_label}<span>{escape(category)}</span><b>{escape(item.priority)} PRIORITY</b></div>'
         f'<h3>{escape(title)}</h3><p>{escape(subtitle)}</p><ul>{facts}</ul></div>'
         f'<div class="fe-edge-action"><span>{escape(item.confidence)} CONFIDENCE</span>'
         f'<strong>{escape(item.recommended_action.replace("_", " "))}</strong></div></article>'

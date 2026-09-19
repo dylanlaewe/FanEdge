@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 .streamlit/secrets.toml
 .DS_Store
+.fanedge/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3

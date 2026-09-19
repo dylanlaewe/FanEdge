@@ -48,6 +48,9 @@ flowchart LR
 - `matchup.py` calculates completed-game fantasy points allowed by defense and offensive position under the selected league's scoring.
 - `intelligence.py` normalizes historical baselines, participation, roles, evidence quality, and same-position teammate availability changes.
 - `opportunity_engine.py` converts factual change signals into corroborated events, user relevance, prioritized opportunities/risks, recommended actions, and structured explanation bundles.
+- `memory.py` defines stable event identity, meaningful-evidence fingerprints, lifecycle transitions, temporal summaries, feedback states, and neutral outcome classifications.
+- `storage.py` implements the replaceable persistence boundary with versioned SQLite schema initialization, scoped snapshots, current event state, decision records, feedback, outcomes, and local product analytics.
+- `outcomes.py` evaluates completed lineup comparisons from league-scored game results when both players' data is available.
 
 ## Product experience
 
@@ -64,6 +67,26 @@ The M8 pipeline is deterministic: **facts → signals → events → user releva
 Events become user-facing only when they affect a current starter, the user's bench, a direct lineup alternative, or a confirmed available player aligned with the user's roster. Actions are categorical—`ADD`, `CONSIDER_ADD`, `START`, `CONSIDER_START`, `MONITOR`, `HOLD`, `REVIEW`, or `NO_ACTION`—and do not force a transaction. Priorities are `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW`, derived from four integer axes: actionability, user relevance, evidence quality, and urgency. No arbitrary probability is shown.
 
 Opportunity objects retain stable IDs, subject/related players, structured signals, relevance relationships, confidence, action, and explanation facts. Nullable `first_seen_week`, `last_seen_week`, `resolved`, and `action_taken` fields reserve a future persistence contract without pretending that history is stored today. When no event clears the threshold, Overview shows a deliberate quiet state instead of manufacturing advice.
+
+## Intelligence memory and decision journal
+
+FanEdge persists only product-relevant state—not full Sleeper or nflverse payloads—to a local SQLite database. A conceptual event key is derived from the user, league, season, event type, primary player, related player, and lineup slot where applicable. Evidence fingerprints exclude timestamps and observation week, so rerunning unchanged intelligence produces `ACTIVE`, not another `NEW` event. Materially stronger or weaker priority/action/confidence becomes `STRENGTHENED` or `WEAKENED`; equal-strength evidence changes become `CHANGED`; a returned event becomes `REOPENED`.
+
+An absent event requires two consecutive fresh snapshots before becoming `RESOLVED`. Failed or incomplete provider refreshes do not advance that counter and instead preserve the event with uncertain freshness. The Overview prioritizes new and changed intelligence, summarizes changes since the previous meaningful snapshot, offers optional Done/Save/Dismiss controls, and exposes a compact decision journal. Feedback is observational only and does not change rankings or future recommendations.
+
+Structured lineup and waiver decisions retain the recommendation, players, evidence fingerprint, confidence, week, and timestamps. After a later week begins, lineup records can compare completed league-scored points for the recommended and alternative players. Outcomes use neutral labels such as `RECOMMENDATION_OUTSCORED_ALTERNATIVE`; they are not causal accuracy claims. Missing game data remains explicitly unavailable.
+
+### Product measurement framework
+
+- **North star candidate — Weekly Action Rate:** percentage of active connected users who save or mark done on at least one FanEdge recommendation in a fantasy week.
+- **Activation:** percentage of connected users who reach a populated Your Edge feed.
+- **Discovery:** percentage of surfaced recommendations whose explanation is opened.
+- **Action:** percentage of surfaced recommendations saved or marked done.
+- **Return:** percentage of connected users who return in a subsequent fantasy week.
+- **Signal quality:** percentage of surfaced opportunities later supported by stronger evidence.
+- **Noise:** dismissal rate by opportunity type.
+
+M9 records the necessary local analytics events behind a small repository method and does not send data to a third-party vendor. These are metric definitions only; FanEdge does not claim measured values yet.
 
 ## Visual identity
 
@@ -99,7 +122,7 @@ Matchup labels aggregate league-scored points conceded by defense, position, and
 
 Weekly nflverse injury reports are compared by GSIS player, team, and position. FanEdge records a factual previous/current status only when a same-position teammate becomes unavailable; it never claims the remaining player inherits that workload. The 2026 depth-chart release is a 51 MB current snapshot with a recently changed schema and no trustworthy prior snapshot in the release. M5 therefore omits depth-chart-rise/fall claims and does not load that file in the app. Current rank parsing exists for a future validated snapshot history, but it does not affect recommendations today.
 
-No database or authentication is used in this MVP.
+No external database or authentication is used in this MVP. Local SQLite supplies the initial memory architecture.
 
 ## Tech stack
 
@@ -128,7 +151,7 @@ Then launch the app:
 streamlit run app.py
 ```
 
-The Sleeper roster experience still works without an OpenAI key; only strategy generation is disabled.
+The Sleeper roster experience still works without an OpenAI key; only strategy generation is disabled. Local intelligence memory defaults to `.fanedge/fanedge.db`; set `FANEDGE_DB_PATH` to use another development path.
 
 ## Deploy to Streamlit Community Cloud
 
@@ -142,9 +165,12 @@ The Sleeper roster experience still works without an OpenAI key; only strategy g
 
 4. Deploy. Dependencies are installed automatically from `requirements.txt`.
 
+Streamlit Community Cloud local disk is not durable across redeployments and may be reset. The M9 SQLite implementation is therefore appropriate for local development, architecture validation, and product testing—not durable production memory on Community Cloud. The repository boundary is intentionally replaceable by a durable service later without changing the opportunity engine.
+
 ## Current limitations
 
-- Supports Sleeper NFL leagues only and has no user accounts or saved history.
+- Supports Sleeper NFL leagues only and has no authentication or cross-device identity beyond the supplied public Sleeper user ID.
+- SQLite memory is local to one running environment and is not durable on ephemeral Streamlit Community Cloud storage.
 - Weekly opponent and kickoff data come from nflverse; injury designations come from Sleeper metadata and may lag official club reporting.
 - Cross-provider identity resolution is intentionally conservative. Unresolved or ambiguous players retain schedule/status context but do not inherit another player's statistics.
 - Lineup recommendations use completed games and current availability, not future-point projections. Early-season samples are therefore intentionally conservative.
@@ -157,5 +183,5 @@ The Sleeper roster experience still works without an OpenAI key; only strategy g
 
 - Add trustworthy projections and deeper usage signals
 - Support weekly lineup slots and player-level projections
-- Add saved teams, recommendation history, and outcome tracking
+- Replace local SQLite with durable hosted persistence when production identity and deployment requirements are defined
 - Expand to trades, multi-league dashboards, and additional fantasy platforms

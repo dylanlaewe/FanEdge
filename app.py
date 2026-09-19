@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from html import escape
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
@@ -18,10 +19,13 @@ from football_data import (
 from intelligence import build_availability_changes, build_historical_index, build_participation_index, build_role_profiles
 from lineup_optimizer import LineupDecision, build_current_lineup, optimize_lineup
 from matchup import DefenseVsPosition, build_defense_vs_position
+from memory import FeedbackStatus, LeagueScope, Lifecycle, ReconciliationResult, TemporalOpportunity
 from opportunity import PlayerOpportunity, build_opportunity_index, build_player_opportunities
 from opportunity_engine import FantasyOpportunity, build_opportunity_feed
+from outcomes import evaluate_pending_lineup_decisions
 from player_identity import PlayerIdentity, PlayerIdentityResolver
 from sleeper_api import Roster, SleeperAPIError, SleeperClient, build_roster, find_user_roster
+from storage import SQLiteRepository
 from strategy_engine import generate_lineup_advice, generate_strategy, generate_waiver_advice
 from styles import APP_CSS
 from waiver_engine import (
@@ -32,6 +36,11 @@ from waiver_engine import (
 load_dotenv()
 st.set_page_config(page_title="FanEdge — AI Fantasy GM", page_icon="🏈", layout="wide")
 st.html(APP_CSS)
+
+
+@st.cache_resource
+def memory_repository(path: str) -> SQLiteRepository:
+    return SQLiteRepository(path)
 
 
 def current_nfl_season(now: datetime | None = None) -> int:
@@ -145,31 +154,96 @@ def top_adds(candidates: list[WaiverCandidate]) -> list[WaiverCandidate]:
 def render_overview(
     league: dict[str, Any], nfl_state: NFLState | None, feed: list[FantasyOpportunity],
     identities: dict[str, PlayerIdentity], data_available: bool,
+    memory: ReconciliationResult | None = None,
+    repository: SQLiteRepository | None = None,
+    scope: LeagueScope | None = None,
 ) -> None:
     week = f"Week {nfl_state.week}" if nfl_state else "This week"
+    temporal = memory.current if memory else tuple(TemporalOpportunity(item, item.opportunity_id, Lifecycle.ACTIVE.value, "", "") for item in feed)
+    resolved = tuple(item for item in (memory.changes if memory else ()) if item.lifecycle == Lifecycle.RESOLVED.value)
+    display_feed = (*temporal, *resolved)
     st.html(page_header("Your edge", "What changed", f"{week} · Proactive decisions for {league.get('name') or 'your league'}."))
-    headline = f"FanEdge found {len(feed)} {'thing' if len(feed) == 1 else 'things'} worth your attention." if feed else "No major changes."
-    detail = "Prioritized from changes in role, opportunity, availability, matchup, and your actual roster." if feed else "FanEdge did not find new evidence strong enough to change your current plan."
+    headline = f"FanEdge found {len(temporal)} {'thing' if len(temporal) == 1 else 'things'} worth your attention." if temporal else f"{len(resolved)} previous {'situation has' if len(resolved) == 1 else 'situations have'} resolved." if resolved else "No major changes."
+    detail = "Prioritized from changes in role, opportunity, availability, matchup, and your actual roster." if temporal else "FanEdge did not find new evidence strong enough to change your current plan."
     st.html(
         '<section class="fe-briefing"><div class="fe-briefing-kicker">FANEDGE OPPORTUNITY ENGINE</div>'
         f'<h2>{escape(headline)}</h2><p>{escape(detail)}</p></section>'
     )
     if not data_available:
         st.info("Some weekly football data is unavailable. Unsupported conclusions are withheld.", icon=":material/info:")
-    if not feed:
+    if memory and memory.has_previous_snapshot:
+        summary = memory.summary
+        summary_items = [
+            (summary.new, "new"), (summary.strengthened, "strengthened"),
+            (summary.weakened, "weakened"), (summary.changed, "changed"),
+            (summary.resolved, "resolved"), (summary.reopened, "reopened"),
+        ]
+        values = "".join(f'<span><strong>{count}</strong> {label}</span>' for count, label in summary_items if count)
+        if values:
+            st.html(f'<div class="fe-eyebrow">SINCE YOUR LAST CHECK</div><div class="fe-since">{values}</div>')
+        else:
+            st.caption("Since your last check: no meaningful evidence changes.")
+    if not display_feed:
         st.html('<section class="fe-quiet"><div class="fe-eyebrow">PLAN HOLDS</div><h3>No action required</h3><p>Quiet weeks are useful: FanEdge will not manufacture a recommendation.</p></section>')
+        render_journal(repository, scope)
         return
-    st.html(section_title("Prioritized feed", len(feed), "item" if len(feed) == 1 else "items"))
+    st.html(section_title("Prioritized feed", len(display_feed), "item" if len(display_feed) == 1 else "items"))
     st.html('<div class="fe-edge-feed">')
-    for item in feed:
+    for temporal_item in display_feed:
+        item = temporal_item.opportunity
         identity = identities.get(item.subject_player.player_id) if item.subject_player else None
-        st.html(opportunity_card(item, identity))
+        st.html(opportunity_card(item, identity, lifecycle=temporal_item.lifecycle))
+        if temporal_item.freshness == "UNCERTAIN":
+            st.caption("Freshness uncertain — the last verified evidence is preserved.")
         label = item.subject_player.name if item.subject_player else item.opportunity_type
-        with st.expander(f"Why this matters · {label}"):
-            for fact in item.explanation_context:
-                st.markdown(f"- {fact}")
-            st.caption(f"Action: {item.recommended_action.replace('_', ' ')} · Confidence: {item.confidence} · Relevance: {', '.join(item.relevance)}")
+        details = st.expander(f"Why this matters · {label}", key=f"explain_{temporal_item.event_key}", on_change="rerun")
+        if details.open:
+            if repository and scope and memory:
+                repository.record_analytics(scope, "explanation_opened", event_key=temporal_item.event_key, idempotency_key=f"explanation:{memory.snapshot_id}:{temporal_item.event_key}")
+            with details:
+                for fact in item.explanation_context:
+                    st.markdown(f"- {fact}")
+                st.caption(f"Action: {item.recommended_action.replace('_', ' ')} · Confidence: {item.confidence} · Relevance: {', '.join(item.relevance)}")
+        if repository and scope and temporal_item.lifecycle != Lifecycle.RESOLVED.value:
+            if temporal_item.feedback:
+                st.caption(f"Journal status: {temporal_item.feedback.title()}")
+            with st.container(horizontal=True, gap="small"):
+                for status, icon in ((FeedbackStatus.DONE, ":material/check:"), (FeedbackStatus.SAVED, ":material/bookmark:"), (FeedbackStatus.DISMISSED, ":material/close:")):
+                    if st.button(status.value.title(), icon=icon, key=f"feedback_{status.value}_{temporal_item.event_key}"):
+                        repository.record_feedback(scope, temporal_item.event_key, status.value)
+                        repository.record_analytics(scope, f"recommendation_{status.value.lower()}", event_key=temporal_item.event_key)
+                        st.toast(f"Recommendation {status.value.lower()}.", icon=icon)
+                        st.rerun()
     st.html('</div>')
+    render_journal(repository, scope)
+
+
+def render_journal(repository: SQLiteRepository | None, scope: LeagueScope | None) -> None:
+    if not repository or not scope:
+        return
+    history = st.expander("Decision journal", icon=":material/history:", key="decision_journal", on_change="rerun")
+    if not history.open:
+        return
+    with history:
+        entries = repository.journal(scope)
+        if not entries:
+            st.caption("Recommendations will appear here after FanEdge surfaces them.")
+            return
+        for entry in entries:
+            timing = "This week" if entry.week == scope.week else f"Week {entry.week}"
+            name = entry.subject_name or entry.opportunity_type.replace("_", " ").title()
+            with st.container(border=True):
+                st.markdown(f"**{name}** · {timing} · {entry.lifecycle.title()}")
+                st.caption(f"{entry.action.replace('_', ' ').title()} · {entry.priority.title()} priority · {entry.confidence.title()} confidence")
+                if entry.related_name:
+                    st.caption(f"Compared with {entry.related_name}")
+                if entry.feedback:
+                    st.badge(entry.feedback.title(), color="green" if entry.feedback == FeedbackStatus.DONE.value else "blue" if entry.feedback == FeedbackStatus.SAVED.value else "gray")
+                if entry.outcome:
+                    score = ""
+                    if entry.recommended_points is not None and entry.alternative_points is not None:
+                        score = f" · {entry.recommended_points:.1f} vs {entry.alternative_points:.1f}"
+                    st.caption(f"Observed result: {entry.outcome.replace('_', ' ').title()}{score}")
 
 
 def render_decision_evidence(decision: LineupDecision) -> None:
@@ -264,6 +338,8 @@ def render_ask_fanedge(
     roster: Roster, league: dict[str, Any], nfl_state: NFLState | None,
     contexts: dict[str, PlayerWeeklyContext], has_openai_key: bool,
     feed: list[FantasyOpportunity],
+    repository: SQLiteRepository | None = None,
+    scope: LeagueScope | None = None,
 ) -> None:
     st.html(
         '<section class="fe-ai-hero"><div><div class="fe-eyebrow">ASK FANEDGE</div><h1>Your league context, explained.</h1>'
@@ -276,6 +352,8 @@ def render_ask_fanedge(
         try:
             with st.spinner("Building your weekly strategy…", show_time=True):
                 st.session_state.strategy = generate_strategy(roster, league, nfl_state=nfl_state, weekly_contexts=contexts, opportunity_feed=feed)
+                if repository and scope:
+                    repository.record_analytics(scope, "ask_fanedge_used")
         except Exception:
             st.error("We couldn’t build your strategy right now.", icon=":material/error:")
     if not has_openai_key:
@@ -328,11 +406,13 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
     historical_participation: dict[Any, Any] = {}
     availability_index: dict[Any, Any] = {}
     depth_ranks: dict[str, int] = {}
+    weekly_data_fresh = False
     if nfl_state:
         with st.status(f"Preparing Week {nfl_state.week}", expanded=False) as load_status:
             try:
                 schedule = cached_weekly_schedule(nfl_state)
                 performances, opportunity_index, matchup_index, historical_index, participation_index, historical_participation, availability_index, depth_ranks = cached_weekly_indexes(nfl_state, league.get("scoring_settings") or {})
+                weekly_data_fresh = bool(schedule.complete)
                 load_status.update(label="Week intelligence ready", state="complete")
             except FootballDataError:
                 load_status.update(label="Some weekly evidence is unavailable", state="error")
@@ -340,6 +420,7 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
         identities = cached_identities(metadata)
     except FootballDataError:
         identities = {}
+        weekly_data_fresh = False
     contexts = build_player_weekly_contexts(roster, metadata, schedule, performances, identities=identities)
     opportunities = build_player_opportunities((*roster.starters, *roster.bench), opportunity_index, identities)
     profiles = build_role_profiles((*roster.starters, *roster.bench), opportunities, identities, historical_index, participation_index, availability_index, depth_ranks, historical_participation)
@@ -358,16 +439,44 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
         waiver_candidates, available_opportunities, roster_needs, matchup_index,
         week=nfl_state.week if nfl_state else None,
     )
+    repository: SQLiteRepository | None = None
+    scope: LeagueScope | None = None
+    memory: ReconciliationResult | None = None
+    database_path = os.getenv("FANEDGE_DB_PATH") or str(Path(".fanedge") / "fanedge.db")
+    repository = memory_repository(database_path)
+    scope_season = nfl_state.season if nfl_state else int(league.get("season") or current_nfl_season())
+    settings = league.get("settings") if isinstance(league.get("settings"), dict) else {}
+    scope_week = nfl_state.week if nfl_state else int(settings.get("leg") or 0)
+    scope = LeagueScope(str(user["user_id"]), selected_id, scope_season, scope_week)
+    memory = repository.reconcile(scope, opportunity_feed, data_fresh=weekly_data_fresh)
+    if weekly_data_fresh:
+        evaluate_pending_lineup_decisions(repository, scope, scope_week, performances)
+    repository.record_analytics(
+        scope, "league_connected",
+        idempotency_key=f"league-connected:{scope.sleeper_user_id}:{scope.league_id}:{scope.season}",
+    )
     has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
     view = st.session_state.application_nav
     if view == "Overview":
-        render_overview(league, nfl_state, opportunity_feed, identities, bool(performances))
+        if repository and scope and memory:
+            repository.record_analytics(scope, "overview_viewed", metadata={"items": len(memory.current)}, idempotency_key=f"overview:{memory.snapshot_id}")
+            for item in memory.current:
+                repository.record_analytics(scope, "recommendation_viewed", event_key=item.event_key, metadata={"type": item.opportunity.opportunity_type}, idempotency_key=f"recommendation:{memory.snapshot_id}:{item.event_key}")
+        render_overview(league, nfl_state, opportunity_feed, identities, weekly_data_fresh, memory, repository, scope)
     elif view == "My Team":
+        if repository and scope and memory:
+            for item in memory.current:
+                if item.opportunity.opportunity_type == "LINEUP_OPPORTUNITY":
+                    repository.record_analytics(scope, "lineup_recommendation_viewed", event_key=item.event_key, idempotency_key=f"lineup-view:{memory.snapshot_id}:{item.event_key}")
         render_my_team(lineup_slots, roster, contexts, opportunities, profiles, identities, decisions, has_openai_key)
     elif view == "Waivers":
+        if repository and scope and memory:
+            for item in memory.current:
+                if item.opportunity.opportunity_type in {"WAIVER_OPPORTUNITY", "BREAKOUT_WATCH"}:
+                    repository.record_analytics(scope, "waiver_recommendation_viewed", event_key=item.event_key, idempotency_key=f"waiver-view:{memory.snapshot_id}:{item.event_key}")
         render_waivers(waiver_candidates, available_opportunities, identities, roster_needs, drop_candidates, has_openai_key, opportunity_feed)
     else:
-        render_ask_fanedge(roster, league, nfl_state, contexts, has_openai_key, opportunity_feed)
+        render_ask_fanedge(roster, league, nfl_state, contexts, has_openai_key, opportunity_feed, repository, scope)
 
 
 try:
