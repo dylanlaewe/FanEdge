@@ -20,6 +20,8 @@ export type NewsEvidence = {
   freshness: string;
 };
 export type Player = {
+  roster_id?: string | null;
+  is_opponent?: boolean;
   id: string;
   name: string;
   position: string;
@@ -115,6 +117,7 @@ export type Snapshot = {
   suggestions: string[];
 };
 export type Answer = {
+  trades?: import("./trades").TradeSearch | null;
   conversation_id: string;
   model_text?: string | null;
   answer: string;

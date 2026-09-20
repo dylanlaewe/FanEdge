@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import {
   ArrowUpRight,
   Check,
@@ -406,7 +407,8 @@ export function InsightCard({
   );
 }
 export function PlayerDrawer() {
-  const { selectedPlayer: player, selectPlayer } = useFanEdge();
+  const { selectedPlayer: player, selectPlayer, setTradeTarget } = useFanEdge();
+  const router = useRouter();
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     if (player && !ref.current?.open) ref.current?.showModal();
@@ -463,6 +465,18 @@ export function PlayerDrawer() {
               </span>
             )}
           </div>
+          {player.is_opponent && (
+            <button
+              className="primary-button drawer-trade"
+              onClick={() => {
+                setTradeTarget(player.id);
+                selectPlayer(null);
+                router.push("/market");
+              }}
+            >
+              Explore trade for {player.name}
+            </button>
+          )}
           <div className="drawer-metrics">
             {player.metrics.map((m) => (
               <Metric key={m.label} {...m} />

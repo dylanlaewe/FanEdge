@@ -5,7 +5,7 @@ import json
 import statistics
 from time import perf_counter
 from urllib.parse import quote
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 def main():
@@ -13,11 +13,17 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--username", default="TKelceLoveMachine")
     parser.add_argument("--samples", type=int, default=20)
+    parser.add_argument("--trades", action="store_true")
     args = parser.parse_args()
 
-    def fetch(path):
+    def fetch(path, body=None):
         start = perf_counter()
-        with urlopen(args.url + path, timeout=90) as response:
+        request = Request(
+            args.url + path,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(request, timeout=90) as response:
             value = json.load(response)
         return value, round((perf_counter() - start) * 1000, 3)
 
@@ -48,6 +54,22 @@ def main():
             "median_ms": round(statistics.median(values), 3),
             "p95_ms": values[max(0, int(len(values) * 0.95) - 1)],
             "max_ms": max(values),
+        }
+    if args.trades:
+        overview, overview_ms = fetch(path("trades"))
+        search, first_ms = fetch(path("trades/search"), {"goal": "BEST_UPGRADE"})
+        samples = sorted(
+            fetch(path("trades/search"), {"goal": "BEST_UPGRADE"})[1]
+            for _ in range(args.samples)
+        )
+        results["trades"] = {
+            "overview_http_ms": overview_ms,
+            "rosters": len(overview["teams"]),
+            "first_search_http_ms": first_ms,
+            "engine_ms": search["elapsed_ms"],
+            "candidates_checked": search["tested"],
+            "cached_search_median_ms": round(statistics.median(samples), 3),
+            "cached_search_p95_ms": samples[max(0, int(len(samples) * 0.95) - 1)],
         }
     print(json.dumps(results, indent=2))
 

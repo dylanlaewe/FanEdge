@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -92,6 +92,8 @@ class LeagueIntelligenceSnapshot:
     timings: dict[str, float]
     team_name: str
     product: Snapshot | None = None
+    rosters: list[dict] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
 
 
 class IntelligenceService:
@@ -107,10 +109,18 @@ class IntelligenceService:
         self.providers = TTLCache(64)
         self.snapshots = TTLCache(32)
         self.conversations = TTLCache(256)
+        self.trade_engines = TTLCache(8)
+        self.trade_results = TTLCache(64)
         self.build_count = 0
 
     def close(self):
-        for cache in (self.providers, self.snapshots, self.conversations):
+        for cache in (
+            self.providers,
+            self.snapshots,
+            self.conversations,
+            self.trade_engines,
+            self.trade_results,
+        ):
             cache.close()
 
     def connect(self, username, *, refresh=False):
@@ -451,6 +461,21 @@ class IntelligenceService:
                 tuple(player for player in active if player.player_id in owned_ids),
                 tuple(combined.values()),
                 scoring_label(league),
+                {
+                    str(pid): str(team.get("roster_id", index + 1))
+                    for index, team in enumerate(rosters)
+                    for pid in team.get("players") or []
+                },
+                str(
+                    raw.get(
+                        "roster_id",
+                        next(
+                            index + 1
+                            for index, team in enumerate(rosters)
+                            if team is raw
+                        ),
+                    )
+                ),
             )
         self.build_count += 1
         timings["total"] = round((perf_counter() - start) * 1000, 3)
@@ -472,7 +497,57 @@ class IntelligenceService:
             fresh,
             timings,
             team_name,
+            rosters=rosters,
+            metadata=metadata,
         )
+
+    def trade_engine(self, snapshot):
+        from trades import TradeEngine
+
+        def build():
+            names = {}
+            try:
+                users = self.providers.get(
+                    ("league_users", snapshot.scope.league_id),
+                    900,
+                    lambda: self.sleeper.get_league_users(snapshot.scope.league_id),
+                )
+                names = {
+                    str(user["user_id"]): str(
+                        (user.get("metadata") or {}).get("team_name")
+                        or user.get("display_name")
+                        or user.get("username")
+                        or ""
+                    )
+                    for user in users
+                }
+            except (SleeperAPIError, AttributeError):
+                pass  # Stable roster-ID labels are explicit fallbacks, never invented names.
+            return TradeEngine(
+                snapshot.state,
+                snapshot.rosters,
+                snapshot.metadata,
+                snapshot.scope.sleeper_user_id,
+                names,
+            )
+
+        return self.trade_engines.get(snapshot.id, 300, build)
+
+    def find_trades(self, snapshot, options):
+        engine = self.trade_engine(snapshot)
+        result = self.trade_results.get(
+            (snapshot.id, options), 300, lambda: engine.search(options)
+        )
+        self.repository.record_analytics(
+            snapshot.scope,
+            "TRADE_RESULTS_GENERATED",
+            metadata={
+                "goal": options.goal,
+                "count": len(result["ideas"]),
+                "tested": result["tested"],
+            },
+        )
+        return result
 
     def record_feedback(self, scope, event_id, status):
         self.repository.record_feedback(scope, event_id, status)
@@ -499,7 +574,14 @@ class IntelligenceService:
                 )
                 snapshot.product = None
 
-    def ask(self, snapshot, question, conversation_id=None, suggested=False):
+    def ask(
+        self,
+        snapshot,
+        question,
+        conversation_id=None,
+        suggested=False,
+        trade_preferences=None,
+    ):
         state, scope = snapshot.state, snapshot.scope
         conversation_id = conversation_id or str(uuid4())
         key = (scope.sleeper_user_id, scope.league_id, scope.season, conversation_id)
@@ -511,7 +593,47 @@ class IntelligenceService:
             state.active_players,
         )
         intent = classify_query(question, resolver, previous_intent=previous[0])
-        answer, _ = answer_query(question, intent, state, previous_answer=previous[1])
+        if intent.primary_intent.startswith("TRADE_"):
+            from backend.trade_copilot import answer_trade
+
+            answer = answer_trade(self, snapshot, question, intent, trade_preferences)
+        elif intent.follow_up and previous[1] and previous[1].trades:
+            from trades import TradeOptions
+
+            preferences = trade_preferences or {}
+            locks = self.trade_engine(snapshot).protections(
+                TradeOptions(
+                    protected=tuple(preferences.get("protected", ())),
+                    trade_block=tuple(preferences.get("trade_block", ())),
+                    protect_core=preferences.get("protect_core", True),
+                )
+            )
+            ideas = [
+                idea
+                for idea in previous[1].trades["ideas"]
+                if not set(idea["outgoing"]) & locks
+            ]
+            answer = replace(
+                previous[1],
+                answer="Here is the same trade evidence for both rosters; no new package has been invented."
+                if ideas
+                else "No previous trade remains under your current protections. Ask for a new search when ready.",
+                trades={
+                    **previous[1].trades,
+                    "ideas": ideas,
+                    "protected": sorted(locks),
+                },
+                player_ids=tuple(
+                    pid
+                    for idea in ideas
+                    for pid in (*idea["outgoing"], *idea["incoming"])
+                ),
+                why=previous[1].why if ideas else (),
+            )
+        else:
+            answer, _ = answer_query(
+                question, intent, state, previous_answer=previous[1]
+            )
         self.conversations.put(key, (intent, answer), 3600)
         self.repository.record_analytics(
             scope,

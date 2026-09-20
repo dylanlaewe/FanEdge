@@ -2,7 +2,7 @@
 
 FanEdge is an AI-powered fantasy football strategist for real Sleeper leagues. It combines exact league ownership, completed-game production, roster construction, and constrained AI explanation.
 
-**M12 product:** Next.js / React / TypeScript frontend + FastAPI + the existing Python intelligence engine. Streamlit is retained as a **legacy/reference UI**, not the product frontend. See [the migration and measured performance report](docs/M12_MIGRATION.md).
+**M13 product:** Next.js / React / TypeScript frontend + FastAPI + the existing Python intelligence engine, now with **league-wide trade discovery** in Market → Trades and Ask FanEdge. Streamlit is retained as a **legacy/reference UI**, not the product frontend. See [the trade model, candid real-league audit, and measurements](docs/M13_TRADES.md) and [the M12 migration report](docs/M12_MIGRATION.md).
 
 ## MVP functionality
 
@@ -22,6 +22,9 @@ FanEdge is an AI-powered fantasy football strategist for real Sleeper leagues. I
 - Blends prior-season baselines with current evidence, adds offensive snap participation, deterministic roles, role trends, and weekly teammate-availability changes
 - Handles missing users, leagues, rosters, player metadata, API failures, and missing AI configuration
 - Caches read-heavy Sleeper data for a responsive experience
+- Profiles every league roster and discovers bounded 1:1, 2:1 and 1:2 trades using complementary needs, relative evidence value, replacement options and both post-trade lineups
+- Supports protected players, willing-to-move preferences, positional goals, opponent-player targeting, manual analysis and deterministic trade questions in Ask
+- Rejects one-sided/invalid/weak-evidence packages rather than manufacturing results; confidence is evidence quality, never an acceptance probability
 
 ## Architecture
 
@@ -48,6 +51,7 @@ flowchart LR
 - `waiver_engine.py` owns league-wide exclusion, roster-needs analysis, transparent candidate scoring, and conservative drop-candidate generation.
 - `opportunity.py` derives position-aware completed-game usage summaries from nflverse weekly statistics.
 - `lineup_optimizer.py` normalizes Sleeper lineup slots and solves a deterministic one-to-one starter/bench assignment.
+- `trades.py` owns bounded deterministic trade discovery and two-sided simulation; `backend/trade_api.py` and `backend/trade_copilot.py` expose it without changing the existing football engines.
 - `team_identity.py` maps explicit provider aliases to one of 32 canonical current NFL team IDs.
 - `matchup.py` calculates completed-game fantasy points allowed by defense and offensive position under the selected league's scoring.
 - `intelligence.py` normalizes historical baselines, participation, roles, evidence quality, and same-position teammate availability changes.

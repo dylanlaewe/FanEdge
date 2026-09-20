@@ -137,6 +137,9 @@ def player(value, state):
         metrics=metrics,
         news=[news(fact) for fact in state.news_facts if fact.subject_player_id == pid],
         evidence=evidence,
+        roster_id=state.ownership.get(pid),
+        is_opponent=pid in state.ownership
+        and state.ownership[pid] != state.user_roster_id,
     )
 
 

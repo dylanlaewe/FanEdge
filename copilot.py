@@ -6,7 +6,7 @@ import json
 import os
 import re
 import unicodedata
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, replace, field
 from enum import StrEnum
 from typing import Any, Iterable
 
@@ -26,6 +26,11 @@ from waiver_engine import DropCandidate, RosterNeeds, WaiverCandidate
 
 
 class IntentType(StrEnum):
+    TRADE_FIND = "TRADE_FIND"
+    TRADE_TARGET = "TRADE_TARGET"
+    TRADE_AWAY = "TRADE_AWAY"
+    TRADE_ANALYZE = "TRADE_ANALYZE"
+    TRADE_PARTNER = "TRADE_PARTNER"
     WEEKLY_PLAN = "WEEKLY_PLAN"
     WHAT_CHANGED = "WHAT_CHANGED"
     LINEUP = "LINEUP"
@@ -93,6 +98,7 @@ class CopilotAnswer:
     unsupported: bool = False
     model_text: str | None = None
     provider_fallback: bool = False
+    trades: dict | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -106,6 +112,7 @@ class CopilotAnswer:
             player_ids=tuple(value.get("player_ids") or ()), hypothetical=bool(value.get("hypothetical")),
             unsupported=bool(value.get("unsupported")), model_text=value.get("model_text"),
             provider_fallback=bool(value.get("provider_fallback")),
+            trades=value.get("trades"),
         )
 
 
@@ -129,6 +136,8 @@ class CopilotState:
     league_players: tuple[Player, ...]
     active_players: tuple[Player, ...]
     scoring_label: str
+    ownership: dict[str, str] = field(default_factory=dict)
+    user_roster_id: str | None = None
 
 
 def _words(value: str) -> tuple[str, ...]:
@@ -222,6 +231,8 @@ def classify_query(
     players, ambiguous = resolver.resolve(question)
     position_match = re.search(r"\b(qb|rb|wr|te|k|def)\b", text)
     position = position_match.group(1).upper() if position_match else None
+    if not position:
+        position = next((pos for phrase, pos in (("running back", "RB"), ("wide receiver", "WR"), ("tight end", "TE"), ("quarterback", "QB")) if phrase in text), None)
     hypothetical = bool(re.search(r"\b(if|what if|suppose|assuming)\b", text))
     timeframe = "SINCE_LAST_CHECK" if "since" in text or "changed" in text else "TODAY" if "today" in text else "THIS_WEEK" if "week" in text or "sunday" in text else None
     follow_up = text in {"why", "why is that", "show me the evidence", "what evidence", "explain", "tell me more"}
@@ -234,6 +245,18 @@ def classify_query(
         )
     if re.search(r"\b(weather|wind|rain|snow|temperature)\b", text):
         intent, unsupported = IntentType.UNSUPPORTED, "WEATHER"
+    elif re.search(r"\b(trade|trades|shop|win now|offer team|i send|i receive)\b", text) or re.search(r"\b(get me|offer for|find me|improve my|i need)\b", text) and (players or position):
+        if re.search(r"\b(partner|trade with)\b", text):
+            intent = IntentType.TRADE_PARTNER
+        elif re.search(r"\b(analyze|evaluate|worth considering|i send|i receive|should i trade)\b", text) or len(players) >= 2 and re.search(r"\b(for|receive)\b", text) and not "without" in text:
+            intent = IntentType.TRADE_ANALYZE
+        elif re.search(r"\b(shop|trade away|trade block)\b", text):
+            intent = IntentType.TRADE_AWAY
+        elif any(p.source_tier == "LEAGUE_ROSTERED" for p in players) or players and re.search(r"\b(get me|offer for)\b", text):
+            intent = IntentType.TRADE_TARGET
+        else:
+            intent = IntentType.TRADE_FIND
+        unsupported = None
     elif re.search(r"\b(what changed|anything new|what happened|since yesterday|since my last check|know today)\b", text):
         intent, unsupported = IntentType.WHAT_CHANGED, None
     elif re.search(r"\b(show me the evidence|what evidence|explain|why are|why did|why is|why isn)\b", text):

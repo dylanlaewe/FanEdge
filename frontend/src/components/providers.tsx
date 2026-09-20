@@ -17,6 +17,12 @@ import type { Connection, Message, Player, Snapshot } from "@/lib/types";
 
 type Account = { username: string; leagueId: string };
 type Store = {
+  tradePreferences: import("@/lib/trades").TradePreferences;
+  setTradePreferences: React.Dispatch<
+    React.SetStateAction<import("@/lib/trades").TradePreferences>
+  >;
+  tradeTarget: string | null;
+  setTradeTarget: (id: string | null) => void;
   account: Account | null;
   ready: boolean;
   connect: (connection: Connection) => void;
@@ -46,6 +52,10 @@ export function Providers({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [selectedPlayer, selectPlayer] = useState<Player | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [tradePreferences, setTradePreferences] = useState<
+    import("@/lib/trades").TradePreferences
+  >({ protected: [], trade_block: [], protect_core: true });
+  const [tradeTarget, setTradeTarget] = useState<string | null>(null);
   const generation = useRef(0);
   const renderGeneration = generation.current;
   useEffect(() => {
@@ -67,11 +77,17 @@ export function Providers({ children }: { children: ReactNode }) {
     generation.current += 1;
     setAccount(value);
     setMessages([]);
+    setTradePreferences({ protected: [], trade_block: [], protect_core: true });
+    setTradeTarget(null);
     selectPlayer(null);
     if (value) localStorage.setItem("fanedge-account", JSON.stringify(value));
     else localStorage.removeItem("fanedge-account");
   }
   const store: Store = {
+    tradePreferences,
+    setTradePreferences,
+    tradeTarget,
+    setTradeTarget,
     account,
     ready,
     selectedPlayer,

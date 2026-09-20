@@ -24,7 +24,10 @@ def create_app(service=None):
         if service is None:
             app.state.service.close()
 
-    app = FastAPI(title="FanEdge", version="12.0", lifespan=lifespan)
+    app = FastAPI(title="FanEdge", version="13.0", lifespan=lifespan)
+    from backend.trade_api import router as trade_router
+
+    app.include_router(trade_router)
 
     @app.middleware("http")
     async def timing(request, call_next):
@@ -73,7 +76,7 @@ def create_app(service=None):
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "service": "fanedge", "version": "12.0"}
+        return {"status": "ok", "service": "fanedge", "version": "13.0"}
 
     @app.get("/api/users/{username}/leagues", response_model=api.Connection)
     def connect(username: str, service=Depends(svc)):
@@ -146,7 +149,11 @@ def create_app(service=None):
     ):
         snap, _ = result
         conversation, intent, answer = service.ask(
-            snap, body.question, body.conversation_id, body.suggested
+            snap,
+            body.question,
+            body.conversation_id,
+            body.suggested,
+            body.trade_preferences.model_dump() if body.trade_preferences else None,
         )
         players = {p.player_id: p for p in snap.state.active_players}
         return api.CopilotResponse(
@@ -167,6 +174,7 @@ def create_app(service=None):
                 if pid in players
             ],
             intent=intent.primary_intent,
+            trades=answer.trades,
         )
 
     @app.post("/api/leagues/{league_id}/events/{event_id}/feedback")

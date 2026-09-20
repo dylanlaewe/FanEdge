@@ -23,6 +23,7 @@ import {
 import { request, title } from "@/lib/api";
 import type { Answer, Connection, League, Snapshot } from "@/lib/types";
 import { useFanEdge, useLeague } from "./providers";
+import { TradeFinder, TradeIdeaCard } from "./trade-finder";
 import {
   Brand,
   EmptyState,
@@ -627,7 +628,13 @@ function Team({ data }: { data: Snapshot }) {
 }
 
 function Market({ data }: { data: Snapshot }) {
-  const [tab, setTab] = useState<"WAIVERS" | "WATCHLIST">("WAIVERS");
+  const { tradeTarget, account } = useFanEdge();
+  const [tab, setTab] = useState<"WAIVERS" | "WATCHLIST" | "TRADES">(
+    tradeTarget ? "TRADES" : "WAIVERS",
+  );
+  useEffect(() => {
+    if (tradeTarget) setTab("TRADES");
+  }, [tradeTarget]);
   const [position, setPosition] = useState("All");
   const [search, setSearch] = useState("");
   const values = data.waivers.filter(
@@ -649,7 +656,7 @@ function Market({ data }: { data: Snapshot }) {
         </span>
       </div>
       <div className="market-tabs" role="tablist" aria-label="Market view">
-        {(["WAIVERS", "WATCHLIST"] as const).map((value) => (
+        {(["WAIVERS", "TRADES", "WATCHLIST"] as const).map((value) => (
           <button
             role="tab"
             aria-selected={tab === value}
@@ -657,70 +664,78 @@ function Market({ data }: { data: Snapshot }) {
             onClick={() => setTab(value)}
           >
             {title(value)}
-            <span>
-              {data.waivers.filter((w) => w.category === value).length}
-            </span>
+            {value !== "TRADES" && (
+              <span>
+                {data.waivers.filter((w) => w.category === value).length}
+              </span>
+            )}
           </button>
         ))}
       </div>
-      <div className="market-toolbar">
-        <div className="filter-pills" aria-label="Position filter">
-          {["All", "QB", "RB", "WR", "TE"].map((p) => (
-            <button
-              key={p}
-              aria-pressed={position === p}
-              onClick={() => setPosition(p)}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-        <label className="player-search">
-          <Search size={16} />
-          <input
-            placeholder="Find a player"
-            aria-label="Find a player"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </label>
-      </div>
-      <div className="market-intro">
-        <strong>
-          {tab === "WAIVERS"
-            ? "Players worth a closer look"
-            : "Potential before the production"}
-        </strong>
-        <span>
-          {tab === "WAIVERS"
-            ? "Role, usage, and your roster shape the shortlist."
-            : "Interesting signals. More evidence needed before a move."}
-        </span>
-      </div>
-      <div className="market-list">
-        {values.length ? (
-          values.map((w, i) => (
-            <article className="market-player" key={w.player.id}>
-              <div className="market-rank">
-                {String(i + 1).padStart(2, "0")}
-              </div>
-              <div className="market-player-content">
-                <PlayerRow player={w.player} slot={w.player.position} />
-                <div className="market-reason">
-                  <span className="badge blue">
-                    {tab === "WAIVERS" ? "Available" : "Watch"}
-                  </span>
-                  <p>{w.reasons.join(" · ")}</p>
-                </div>
-              </div>
-            </article>
-          ))
-        ) : (
-          <EmptyState title="No players match this view">
-            Try another position or check the other market tab.
-          </EmptyState>
-        )}
-      </div>
+      {tab === "TRADES" ? (
+        <TradeFinder key={`${account?.username}-${account?.leagueId}`} />
+      ) : (
+        <>
+          <div className="market-toolbar">
+            <div className="filter-pills" aria-label="Position filter">
+              {["All", "QB", "RB", "WR", "TE"].map((p) => (
+                <button
+                  key={p}
+                  aria-pressed={position === p}
+                  onClick={() => setPosition(p)}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+            <label className="player-search">
+              <Search size={16} />
+              <input
+                placeholder="Find a player"
+                aria-label="Find a player"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </label>
+          </div>
+          <div className="market-intro">
+            <strong>
+              {tab === "WAIVERS"
+                ? "Players worth a closer look"
+                : "Potential before the production"}
+            </strong>
+            <span>
+              {tab === "WAIVERS"
+                ? "Role, usage, and your roster shape the shortlist."
+                : "Interesting signals. More evidence needed before a move."}
+            </span>
+          </div>
+          <div className="market-list">
+            {values.length ? (
+              values.map((w, i) => (
+                <article className="market-player" key={w.player.id}>
+                  <div className="market-rank">
+                    {String(i + 1).padStart(2, "0")}
+                  </div>
+                  <div className="market-player-content">
+                    <PlayerRow player={w.player} slot={w.player.position} />
+                    <div className="market-reason">
+                      <span className="badge blue">
+                        {tab === "WAIVERS" ? "Available" : "Watch"}
+                      </span>
+                      <p>{w.reasons.join(" · ")}</p>
+                    </div>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <EmptyState title="No players match this view">
+                Try another position or check the other market tab.
+              </EmptyState>
+            )}
+          </div>
+        </>
+      )}
     </>
   );
 }
@@ -732,7 +747,7 @@ function Ask({
   data: Snapshot;
   endpoint: (route: string) => string;
 }) {
-  const { messages, setMessages } = useFanEdge();
+  const { messages, setMessages, tradePreferences } = useFanEdge();
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
@@ -758,6 +773,7 @@ function Ask({
         conversation_id:
           prior?.role === "assistant" ? prior.answer.conversation_id : null,
         suggested,
+        trade_preferences: tradePreferences,
       });
       setMessages((prev) => [...prev, { role: "assistant", answer }]);
     } catch (e) {
@@ -854,6 +870,13 @@ function Ask({
                       ))}
                     </div>
                   )}
+                  {m.answer.trades?.ideas.map((idea) => (
+                    <TradeIdeaCard
+                      key={idea.id}
+                      idea={idea}
+                      players={m.answer.trades!.players}
+                    />
+                  ))}
                   {m.answer.evidence.length > 0 && (
                     <EvidencePanel
                       evidence={m.answer.evidence}

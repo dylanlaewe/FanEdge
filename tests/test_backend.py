@@ -325,3 +325,123 @@ def test_conversation_isolation_between_leagues(service):
     other = replace(snapshot, scope=replace(snapshot.scope, league_id="other"))
     _, intent, _ = service.ask(other, "Why?", conversation)
     assert not intent.follow_up
+
+
+@pytest.fixture
+def trade_context(service):
+    from dataclasses import replace
+    from test_trades import fixture_engine
+
+    engine = fixture_engine()
+    snap, _ = service.get_snapshot("manager", "league")
+    snap.state = replace(
+        snap.state,
+        active_players=tuple(engine.players.values()),
+        roster=engine.state.roster,
+        contexts=engine.state.contexts,
+        profiles={},
+        opportunities={},
+        ownership=engine.owners,
+        user_roster_id="a",
+    )
+    engine.state = snap.state
+    service.trade_engine = lambda snapshot: engine
+    return engine
+
+
+def test_trade_endpoints_and_cache_preserve_base_snapshot(
+    client, service, trade_context
+):
+    base = "/api/leagues/league/trades"
+    overview = client.get(base + "?username=manager")
+    assert overview.status_code == 200
+    assert len(overview.json()["teams"]) == 2
+    assert overview.json()["players"]["br2"]["is_opponent"]
+    request = {"goal": "RB", "protect_core": False}
+    first = client.post(base + "/search?username=manager", json=request)
+    assert first.status_code == 200 and first.json()["ideas"]
+    assert (
+        client.post(base + "/search?username=manager", json=request).json()
+        == first.json()
+    )
+    assert service.build_count == 1
+    result = client.post(
+        base + "/analyze?username=manager",
+        json={**request, "outgoing": ["aw2"], "incoming": ["br2"]},
+    )
+    assert result.status_code == 200 and result.json()["accepted"]
+    assert service.repository.analytics_count("TRADE_ANALYZED") == 1
+    assert (
+        client.post(
+            base + "/search?username=manager", json={"protected": ["br2"]}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            base + "/search?username=manager", json={"goal": "DYNASTY"}
+        ).status_code
+        == 422
+    )
+
+
+@pytest.mark.parametrize(
+    "question,intent",
+    [
+        ("Find me an RB trade", "TRADE_FIND"),
+        ("Get me Player br2", "TRADE_TARGET"),
+        ("Shop Player aw2", "TRADE_AWAY"),
+        ("Trade Player aw2 for Player br2", "TRADE_ANALYZE"),
+        ("Who should I trade with?", "TRADE_PARTNER"),
+    ],
+)
+def test_trade_copilot_uses_engine_not_model(client, trade_context, question, intent):
+    result = client.post(
+        "/api/leagues/league/copilot?username=manager", json={"question": question}
+    )
+    assert result.status_code == 200
+    assert result.json()["intent"] == intent
+    if intent != "TRADE_PARTNER":
+        assert result.json()["trades"]["ideas"]
+    assert result.json()["model_text"] is None
+
+
+def test_copilot_protection_and_dynasty_guard(client, trade_context):
+    url = "/api/leagues/league/copilot?username=manager"
+    response = client.post(
+        url, json={"question": "Find me an RB trade without giving up Player aw2"}
+    )
+    assert all(
+        "aw2" not in idea["outgoing"] for idea in response.json()["trades"]["ideas"]
+    )
+    response = client.post(
+        url, json={"question": "Find a dynasty trade with draft picks"}
+    )
+    assert response.json()["unsupported"]
+
+
+def test_trade_followup_obeys_new_protections(client, trade_context):
+    url = "/api/leagues/league/copilot?username=manager"
+    first = client.post(url, json={"question": "Find me an RB trade"}).json()
+    response = client.post(
+        url,
+        json={
+            "question": "why",
+            "conversation_id": first["conversation_id"],
+            "trade_preferences": {"protected": ["aw2"]},
+        },
+    )
+    assert response.status_code == 200
+    assert all(
+        "aw2" not in idea["outgoing"] for idea in response.json()["trades"]["ideas"]
+    )
+
+
+def test_trade_analysis_does_not_silently_reverse_explicit_sides(client, trade_context):
+    result = client.post(
+        "/api/leagues/league/copilot?username=manager",
+        json={"question": "I send Player br2 for Player aw2"},
+    )
+    assert result.status_code == 200
+    assert "clarify the direction" in result.json()["answer"]
+    assert result.json()["trades"] is None

@@ -43,9 +43,13 @@ class SleeperClient:
             response.raise_for_status()
             return response.json()
         except requests.Timeout as exc:
-            raise SleeperAPIError("Sleeper took too long to respond. Please try again.") from exc
+            raise SleeperAPIError(
+                "Sleeper took too long to respond. Please try again."
+            ) from exc
         except requests.RequestException as exc:
-            raise SleeperAPIError("Could not connect to Sleeper. Please try again shortly.") from exc
+            raise SleeperAPIError(
+                "Could not connect to Sleeper. Please try again shortly."
+            ) from exc
         except ValueError as exc:
             raise SleeperAPIError("Sleeper returned an unreadable response.") from exc
 
@@ -59,7 +63,11 @@ class SleeperClient:
         data = self._get(f"/user/{user_id}/leagues/nfl/{season}")
         if not isinstance(data, list):
             raise SleeperAPIError("Sleeper returned malformed league data.")
-        return [league for league in data if isinstance(league, dict) and league.get("league_id")]
+        return [
+            league
+            for league in data
+            if isinstance(league, dict) and league.get("league_id")
+        ]
 
     def get_rosters(self, league_id: str) -> list[dict[str, Any]]:
         data = self._get(f"/league/{league_id}/rosters")
@@ -71,7 +79,15 @@ class SleeperClient:
         data = self._get("/players/nfl")
         if not isinstance(data, dict):
             raise SleeperAPIError("Sleeper returned malformed player data.")
-        return {str(key): value for key, value in data.items() if isinstance(value, dict)}
+        return {
+            str(key): value for key, value in data.items() if isinstance(value, dict)
+        }
+
+    def get_league_users(self, league_id: str) -> list[dict[str, Any]]:
+        data = self._get(f"/league/{quote(league_id, safe='')}/users")
+        if not isinstance(data, list):
+            raise SleeperAPIError("Sleeper returned malformed league manager data.")
+        return [value for value in data if isinstance(value, dict) and value.get("user_id")]
 
     def get_nfl_state(self) -> dict[str, Any]:
         data = self._get("/state/nfl")
@@ -93,7 +109,9 @@ def _player_from_metadata(player_id: str, players: dict[str, dict[str, Any]]) ->
     full_name = metadata.get("full_name")
     if not full_name:
         full_name = " ".join(
-            part for part in (metadata.get("first_name"), metadata.get("last_name")) if part
+            part
+            for part in (metadata.get("first_name"), metadata.get("last_name"))
+            if part
         )
     return Player(
         player_id=str(player_id),
@@ -108,11 +126,19 @@ def build_roster(roster: dict[str, Any], players: dict[str, dict[str, Any]]) -> 
     raw_players = roster.get("players") or []
     raw_starters = roster.get("starters") or []
     if not isinstance(raw_players, list) or not isinstance(raw_starters, list):
-        raise SleeperAPIError("Sleeper returned malformed player information for this roster.")
+        raise SleeperAPIError(
+            "Sleeper returned malformed player information for this roster."
+        )
 
     player_ids = [str(player_id) for player_id in raw_players if player_id is not None]
-    starter_ids = [str(player_id) for player_id in raw_starters if player_id not in (None, "0")]
+    starter_ids = [
+        str(player_id) for player_id in raw_starters if player_id not in (None, "0")
+    ]
     starter_set = set(starter_ids)
     starters = [_player_from_metadata(player_id, players) for player_id in starter_ids]
-    bench = [_player_from_metadata(player_id, players) for player_id in player_ids if player_id not in starter_set]
+    bench = [
+        _player_from_metadata(player_id, players)
+        for player_id in player_ids
+        if player_id not in starter_set
+    ]
     return Roster(starters=starters, bench=bench)
