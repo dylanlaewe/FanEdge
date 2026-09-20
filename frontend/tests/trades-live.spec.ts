@@ -19,7 +19,7 @@ test("real trade finder: desktop tablet mobile, protected players, analysis and 
   await page.getByRole("link", { name: "Market", exact: true }).click();
   await page.getByRole("tab", { name: "Trades", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "Find the fit. Then make your move." }),
+    page.getByRole("heading", { name: "Trade discovery Experimental" }),
   ).toBeVisible();
   const times = [];
   for (const width of [1440, 768, 390]) {

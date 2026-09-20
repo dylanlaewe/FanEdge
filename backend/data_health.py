@@ -112,7 +112,7 @@ class DataHealth:
         if keys is None:
             observed = {row["dataset"] for row in rows}
             for dataset, threshold in {
-                "players": 3600,
+                "players": 86400,
                 "nfl_state": 300,
                 "schedule_rows": 21600,
                 "stats": 21600,
@@ -146,6 +146,9 @@ class ProviderCache(TTLCache):
             try:
                 value = factory()
             except Exception:
+                from backend.beta import log_request, correlation_id
+                log_request("provider", "PROVIDER_UNAVAILABLE", correlation_id.get(), 0,
+                            stage="fetch", provider=DATASETS.get(key[0] if isinstance(key, tuple) else key, "unknown"))
                 self.health.observe(
                     key,
                     ttl,

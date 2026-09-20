@@ -1,6 +1,7 @@
 """Bounded, single-flight TTL caches with optional stale-while-revalidate."""
 
 from collections import OrderedDict
+from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import RLock
@@ -38,7 +39,7 @@ class TTLCache:
                     force or self.retry_after.get(key, 0) <= self.clock()
                 ):
                     self.pending.add(key)
-                    self.pool.submit(self._refresh, key, ttl, factory)
+                    self.pool.submit(copy_context().run, self._refresh, key, ttl, factory)
                 return entry.value
         with self.key_locks[hash(key) % len(self.key_locks)]:
             with self.lock:

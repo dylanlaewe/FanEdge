@@ -20,10 +20,11 @@ def context(
     return service, snapshot
 
 
-def players_for(engine, snapshot):
+def players_for(engine, snapshot, ids=None):
     return {
         pid: presenter.player(engine.players[pid], snapshot.state)
-        for pid in engine.owners
+        for pid in (engine.owners if ids is None else ids)
+        if pid in engine.players
     }
 
 
@@ -48,7 +49,8 @@ def search(body: api.TradeRequest, ctx: TradeContext):
         value = service.find_trades(snapshot, body.options())
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    return {**value, "players": players_for(service.trade_engine(snapshot), snapshot)}
+    ids = {pid for idea in value["ideas"] for pid in (*idea["incoming"], *idea["outgoing"])}
+    return {**value, "players": players_for(service.trade_engine(snapshot), snapshot, ids)}
 
 
 @router.post("/diagnostics")
@@ -74,4 +76,4 @@ def analyze(body: api.TradeAnalyzeRequest, ctx: TradeContext):
             "received_count": len(body.incoming),
         },
     )
-    return {**result, "players": players_for(engine, snapshot)}
+    return {**result, "players": players_for(engine, snapshot, set(body.outgoing + body.incoming))}

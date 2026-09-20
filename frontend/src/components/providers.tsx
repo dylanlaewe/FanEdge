@@ -66,8 +66,13 @@ export function Providers({ children }: { children: ReactNode }) {
       if (
         typeof saved?.username === "string" &&
         typeof saved?.leagueId === "string"
-      )
+      ) {
         setAccount(saved);
+        if (!sessionStorage.getItem("fanedge-session"))
+          request("/api/beta/analytics", { event: "return_session" }).catch(
+            () => {},
+          );
+      }
     } catch {
       /* corrupt preferences are ignored */
     }
@@ -103,6 +108,10 @@ export function Providers({ children }: { children: ReactNode }) {
         username: connection.username,
         leagueId: connection.leagues[0].id,
       });
+      request(
+        `/api/leagues/${encodeURIComponent(connection.leagues[0].id)}/beta/analytics?username=${encodeURIComponent(connection.username)}`,
+        { event: "connect_succeeded" },
+      ).catch(() => {});
     },
     selectLeague: (id) => {
       if (account) save({ ...account, leagueId: id });

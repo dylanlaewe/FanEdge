@@ -1,4 +1,5 @@
 "use client";
+import { useBetaEvent, Helpful } from "./beta";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeftRight, LockKeyhole, Search, Sparkles } from "lucide-react";
@@ -187,11 +188,13 @@ export function TradeIdeaCard({
           )}
         </div>
       </footer>
+      <Helpful id={`trade:${idea.id}`} />
     </article>
   );
 }
 
 export function TradeFinder() {
+  const betaTrack = useBetaEvent();
   const {
     account,
     tradePreferences,
@@ -274,6 +277,7 @@ export function TradeFinder() {
     partner_id: partner || null,
   });
   async function find(variation = false, chosenPartner = partner) {
+    betaTrack("trade_search");
     const requestGeneration = ++generation.current;
     setPending(true);
     setError("");
@@ -324,10 +328,13 @@ export function TradeFinder() {
       <div className="trade-intro">
         <div>
           <span className="eyebrow">YOUR LEAGUE IS THE ADVANTAGE</span>
-          <h2>Find the fit. Then make your move.</h2>
+          <h2>
+            Trade discovery <span className="badge">Experimental</span>
+          </h2>
           <p>
-            Discover ideas grounded in all {data.teams.length} rosters—not just
-            similar player values.
+            Explore fits across {data.teams.length} rosters. Ideas are not
+            fair-value guarantees. FanEdge rejects packages it cannot support;
+            review the evidence.
           </p>
         </div>
         <ArrowLeftRight size={30} />
@@ -642,7 +649,10 @@ export function TradeFinder() {
             </p>
           ))}
           {analysis.idea && (
-            <TradeIdeaCard idea={analysis.idea} players={analysis.players} />
+            <TradeIdeaCard
+              idea={analysis.idea}
+              players={{ ...data.players, ...analysis.players }}
+            />
           )}
         </section>
       )}
@@ -676,7 +686,7 @@ export function TradeFinder() {
                 <TradeIdeaCard
                   key={idea.id}
                   idea={idea}
-                  players={result.players}
+                  players={{ ...data.players, ...result.players }}
                   onAnalyze={() => analyze(idea.outgoing, idea.incoming)}
                   onVariation={() => find(true)}
                   onProtect={protect}

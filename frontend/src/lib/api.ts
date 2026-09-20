@@ -1,11 +1,23 @@
 export async function request<T>(url: string, body?: unknown): Promise<T> {
+  let session = "";
+  if (typeof window !== "undefined") {
+    session = sessionStorage.getItem("fanedge-session") || crypto.randomUUID();
+    sessionStorage.setItem("fanedge-session", session);
+  }
   const response = await fetch(
     url,
     body === undefined
-      ? undefined
+      ? {
+          headers: { "X-FanEdge-Session": session },
+          signal: AbortSignal.timeout(60_000),
+        }
       : {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-FanEdge-Session": session,
+          },
+          signal: AbortSignal.timeout(60_000),
           body: JSON.stringify(body),
         },
   );

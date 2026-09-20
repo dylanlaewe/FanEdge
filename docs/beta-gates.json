@@ -1,0 +1,13 @@
+{
+  "data_integrity": {"status": "PASS", "evidence": "M15 existing integrity/Rams regressions and local available-league audit: zero detected contradictions. Re-run for every added league."},
+  "recommendation_safety": {"status": "FAIL", "evidence": "Release candidate audit is available, but independent human labels are not yet completed. Unreviewed is not a pass."},
+  "ai_grounding": {"status": "PASS", "evidence": "Default AI prose disabled; deterministic grounding and simulated provider-failure tests. Not a validation of enabled model prose."},
+  "performance": {"status": "PASS", "evidence": "Local production-build measurements and bounds documented in M15_RELEASE.md. Deployment-host/network performance still requires validation."},
+  "reliability": {"status": "PASS", "evidence": "Provider degradation, stale refresh, timeout, rate limit, cache and optional-AI failure test coverage."},
+  "security": {"status": "FAIL", "evidence": "No verified session-to-owner identity boundary. Username is a public lookup, not authentication; invite/deployment isolation requires verification."},
+  "providers": {"status": "FAIL", "evidence": "ESPN capabilities disabled. Sleeper intended commercial/noncommercial use and nflverse upstream dataset rights require owner disposition."},
+  "independent_leagues": {"status": "FAIL", "evidence": "Only one available real owner/league audited; no invented independent calibration."},
+  "ux": {"status": "FAIL", "evidence": "Operator/automated desktop and mobile flows are not evidence that independent testers can use the product without assistance."},
+  "deployment": {"status": "FAIL", "evidence": "No target beta hosting, TLS/invite/session boundary or scheduled retention verified."},
+  "rollback": {"status": "FAIL", "evidence": "Rollback procedure documented; no target-host rehearsal completed."}
+}

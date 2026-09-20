@@ -3,6 +3,7 @@
 from backend import schemas as api
 from copilot import contextual_suggestions
 from visuals import resolve_player_image, team_visual
+from beta_config import capabilities
 
 
 def team(code):
@@ -11,7 +12,7 @@ def team(code):
         api.Team(
             abbreviation=value.abbreviation,
             display_name=value.display_name,
-            logo_url=value.logo_url,
+            logo_url=value.logo_url if capabilities()["team_logos_enabled"] else None,
             color=value.color,
         )
         if value
@@ -119,7 +120,7 @@ def player(value, state):
         name=value.name,
         position=value.position,
         team=team(value.team),
-        image_url=resolve_player_image(state.identities.get(pid)),
+        image_url=resolve_player_image(state.identities.get(pid)) if capabilities()["player_images_enabled"] else None,
         status=status.upper(),
         matchup=api.Matchup(
             opponent=team(context.opponent) if context and context.opponent else None,

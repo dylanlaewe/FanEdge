@@ -1,4 +1,5 @@
 "use client";
+import { Helpful, useBetaEvent } from "./beta";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -209,11 +210,15 @@ export function EvidencePanel({
   evidence: Evidence[];
   onOpen?: () => void;
 }) {
+  const track = useBetaEvent();
   return (
     <details
       className="evidence"
       onToggle={(e) => {
-        if (e.currentTarget.open) onOpen?.();
+        if (e.currentTarget.open) {
+          onOpen?.();
+          track("evidence_opened");
+        }
       }}
     >
       <summary>
@@ -302,6 +307,9 @@ export function RecommendationCard({
       </div>
       <p>{recommendation.reasons.join(" · ")}</p>
       <EvidencePanel evidence={recommendation.evidence} />
+      <Helpful
+        id={`lineup:${recommendation.slot}:${recommendation.player.id}`}
+      />
     </article>
   );
 }
@@ -392,6 +400,7 @@ export function InsightCard({
           ))}
         </div>
       </div>
+      <Helpful id={event.id} />
       <EvidencePanel
         evidence={[
           ...event.evidence,
@@ -407,7 +416,11 @@ export function InsightCard({
   );
 }
 export function PlayerDrawer() {
+  const track = useBetaEvent();
   const { selectedPlayer: player, selectPlayer, setTradeTarget } = useFanEdge();
+  useEffect(() => {
+    if (player) track("player_drawer");
+  }, [player?.id]);
   const router = useRouter();
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {

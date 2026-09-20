@@ -1151,12 +1151,19 @@ def answer_query(
     if not key or draft.unsupported or intent.ambiguous_players:
         return draft, context
     try:
-        openai = client or OpenAI(api_key=key)
+        from backend.beta import ai_budget
+        if not ai_budget.allow("hour", 30, 3600) or not ai_budget.allow("day", 100, 86400):
+            return replace(draft, provider_fallback=True), context
+        payload = json.dumps({"user_question": question, "retrieved_context": context, "deterministic_draft": draft.to_dict()}, ensure_ascii=False)
+        if len(payload) > 24000:
+            return replace(draft, provider_fallback=True), context
+        openai = client or OpenAI(api_key=key, timeout=8.0, max_retries=0)
         response = openai.responses.create(
             model=model,
             instructions=COPILOT_SYSTEM_PROMPT,
-            input=json.dumps({"user_question": question, "retrieved_context": context, "deterministic_draft": draft.to_dict()}, ensure_ascii=False),
+            input=payload,
             max_output_tokens=320,
+            store=False,
         )
         if not response.output_text:
             raise RuntimeError("empty response")
@@ -1165,6 +1172,9 @@ def answer_query(
             raise RuntimeError("ungrounded response")
         return replace(draft, model_text=model_text), context
     except Exception:
+        from backend.beta import log_request, correlation_id
+        log_request("copilot", "AI_FALLBACK", correlation_id.get(), 0,
+                    stage="optional_phrasing", provider="OpenAI")
         return replace(draft, provider_fallback=True), context
 
 

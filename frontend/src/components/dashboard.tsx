@@ -21,6 +21,7 @@ import {
   Zap,
 } from "lucide-react";
 import { request, title } from "@/lib/api";
+import { BetaPanel, Helpful, useBetaEvent } from "./beta";
 import type { Answer, Connection, League, Snapshot } from "@/lib/types";
 import { useFanEdge, useLeague } from "./providers";
 import { TradeFinder, TradeIdeaCard } from "./trade-finder";
@@ -133,8 +134,15 @@ function Connect() {
   const [username, setUsername] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    request("/api/beta/analytics", { event: "landing" }).catch(() => {});
+  }, []);
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (loading) return;
+    request("/api/beta/analytics", { event: "connect_started" }).catch(
+      () => {},
+    );
     setLoading(true);
     setError("");
     try {
@@ -234,7 +242,8 @@ function Connect() {
           </div>
           <p className="connect-footnote">
             You stay in control. FanEdge never changes your lineup or makes
-            transactions.
+            transactions. Beta usage counts and feedback are stored on our
+            server; your questions are not included in analytics.
           </p>
         </section>
       </div>
@@ -310,6 +319,7 @@ export function AppShell({
         </div>
         <main className={`main-content ${view === "ask" ? "chat-main" : ""}`}>
           {children}
+          <BetaPanel view={view} />
         </main>
       </div>
       <MobileNav view={view} />
@@ -628,6 +638,7 @@ function Team({ data }: { data: Snapshot }) {
 }
 
 function Market({ data }: { data: Snapshot }) {
+  const track = useBetaEvent();
   const { tradeTarget, account } = useFanEdge();
   const [tab, setTab] = useState<"WAIVERS" | "WATCHLIST" | "TRADES">(
     tradeTarget ? "TRADES" : "WAIVERS",
@@ -637,6 +648,9 @@ function Market({ data }: { data: Snapshot }) {
   }, [tradeTarget]);
   const [position, setPosition] = useState("All");
   const [search, setSearch] = useState("");
+  useEffect(() => {
+    if (tab === "WAIVERS" || tab === "TRADES") track(tab.toLowerCase());
+  }, [tab]);
   const values = data.waivers.filter(
     (w) =>
       w.category === tab &&
@@ -748,6 +762,7 @@ function Market({ data }: { data: Snapshot }) {
                       </span>
                       <p>{w.reasons.join(" · ")}</p>
                     </div>
+                    <Helpful id={`waiver:${w.category}:${w.player.id}`} />
                   </div>
                 </article>
               ))
@@ -778,6 +793,11 @@ function Ask({
   data: Snapshot;
   endpoint: (route: string) => string;
 }) {
+  const ai = useQuery({
+    queryKey: ["capabilities"],
+    queryFn: () => request<{ ai_enabled: boolean }>("/api/capabilities"),
+    staleTime: 300_000,
+  });
   const { messages, setMessages, tradePreferences } = useFanEdge();
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
@@ -822,7 +842,11 @@ function Ask({
         </span>
         <div>
           <h1>Ask FanEdge</h1>
-          <p>Your league. Your players. Let’s find your next move.</p>
+          <p>
+            {ai.data?.ai_enabled
+              ? "Grounded answers · optional AI phrasing enabled."
+              : "Grounded answers · AI phrasing is off."}
+          </p>
         </div>
         <span className="badge lime">Connected</span>
       </div>
@@ -923,6 +947,7 @@ function Ask({
                       Answer preserved from verified league evidence.
                     </small>
                   )}
+                  <Helpful id={`ask:${m.answer.conversation_id}:${i}`} />
                 </article>
               ),
             )}

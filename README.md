@@ -2,7 +2,18 @@
 
 FanEdge is an AI-powered fantasy football strategist for real Sleeper leagues. It combines exact league ownership, completed-game production, roster construction, and constrained AI explanation.
 
-**M14 product:** Next.js / React / TypeScript frontend + FastAPI + the existing Python intelligence engine, now with evidence tiers, trade rejection diagnostics, unified deterministic Ask planning and centralized data health. Streamlit remains a **legacy/reference UI**, not the product frontend. Read the [M14 calibration research and candid league audit](docs/M14_CALIBRATION.md), [quality scorecard](docs/QUALITY_SCORECARD.md), [M13 trade model](docs/M13_TRADES.md) and [M12 migration report](docs/M12_MIGRATION.md).
+**M15 release candidate:** Next.js / React / TypeScript + FastAPI + the existing Python intelligence engines. Beta-safe optional provider configuration, audit/label tools, rate/cost controls, contextual feedback, analytics and release gates are now included. **NO-GO for independent beta invitations until the remaining gates are cleared.** See the [release report](docs/M15_RELEASE.md), [release checklist](docs/BETA_RELEASE_CHECKLIST.md), [provider register](docs/BETA_PROVIDERS.md), [operations/privacy guide](docs/BETA_OPERATIONS.md), [tester script](docs/BETA_TEST_SCRIPT.md) and [product case study](docs/PRODUCT_CASE_STUDY.md). Streamlit remains a legacy/reference UI, not the beta frontend. Historical reports: [M14](docs/M14_CALIBRATION.md), [quality scorecard](docs/QUALITY_SCORECARD.md), [M13](docs/M13_TRADES.md), [M12](docs/M12_MIGRATION.md).
+
+Optional news, player images, team logos, OpenAI phrasing and ADP calibration default **off**. Inspect `/api/capabilities`; configure `.env.example` flags only after the provider/usage review. Core deterministic answers remain available. A Sleeper username is a public lookup, **not authentication**; do not expose private journal/feedback features to independent users before verifying an identity boundary.
+
+```sh
+.venv/bin/python scripts/audit_league.py --username USER --league LEAGUE_ID --output /private/audit.json
+# Fill the separate audit.labels.json; never edit production ranking data.
+.venv/bin/python scripts/calibration_report.py /private/audit.json --gates docs/beta-gates.json
+.venv/bin/python scripts/beta_report.py --db .fanedge/fanedge.db --audit /private/audit.json
+.venv/bin/python scripts/beta_ops.py status
+.venv/bin/python scripts/scan_secrets.py
+```
 
 M14 does not claim market-price accuracy. Default trade searches can legitimately be empty. Optional Fantasy Football Calculator draft-sentiment calibration is disabled; explicitly set `FANEDGE_MARKET_ADP_ENABLED=1` to enable its conservative date/format/sample/identity gates. It is not a rest-of-season value feed. See the research report for attribution and provider-rights blockers before commercial beta.
 
@@ -143,7 +154,7 @@ No external database or authentication is used in this MVP. Local SQLite supplie
 
 M10 adds current reporting as a separate evidence layer: **news → entity resolution → fact extraction → league relevance → corroboration → fantasy impact → action**. It does not add a generic news feed. A story is visible only when a resolved fact connects to the selected roster or to an available same-team, same-position player who already has independent structured role evidence.
 
-FanEdge uses ESPN's official NFL RSS feed at `https://www.espn.com/espn/rss/nfl/news`. ESPN explicitly publishes this feed for news-reader/syndication use. FanEdge retains the publisher, timestamp, canonical URL, and a short unchanged supporting excerpt, always links back to ESPN, and never fetches article pages. The implementation also evaluated NFL.com (its legacy `?service=rss` endpoint currently returns HTML), Yahoo Sports' valid but broad syndicated NFL RSS feed, PFF's analysis-oriented RSS feeds, and FantasySP's non-commercial aggregated feeds. ESPN alone was selected as the smallest timely default with clear machine-readable delivery; adding more sources would increase duplicate and licensing complexity without being necessary for the first milestone.
+The optional news adapter reads ESPN's NFL RSS feed at `https://www.espn.com/espn/rss/nfl/news`, preserves attribution and never fetches article pages. **M15 disables it by default pending product-use review.** A published RSS feed does not establish permission for this product's redistribution. Earlier milestone source selection is not a legal clearance; see the current provider register.
 
 Full player names resolve exactly. A surname resolves only when one explicit canonical team is present and that team has exactly one matching active fantasy player. Ambiguous mentions remain unresolved. Extraction is deterministic and intentionally narrow: explicit status, practice, transaction, and attributable coach-workload statements become normalized facts; predictions, implications, and unsupported speculation do not. Reported facts and FanEdge inferences remain separately labeled in every explanation.
 
@@ -155,7 +166,7 @@ The feed is fetched as one batch and its resolved facts are cached by the shared
 
 M11 turns Ask FanEdge into a league-aware, multi-turn copilot rather than a generic chat wrapper. A deterministic router recognizes weekly planning, recent changes, lineup and start/sit decisions, waivers, drops, roster strengths and weaknesses, player analysis, injuries, news, matchups, and evidence requests. Player mentions resolve in league-relevance order: the user's roster, surfaced waiver candidates, other league-rostered players, then the active NFL universe. Ambiguity produces a clarification instead of a guessed identity.
 
-Each intent calls only the internal capabilities it needs—for example, waiver questions retrieve confirmed available candidates, roster needs, and conservative drop options, while a player question retrieves that player's weekly context, role, opportunity, matchup, news, and surfaced events. The deterministic answer is always available. When an OpenAI key is configured, the Responses API may improve phrasing under a strict supplied-context contract, but it cannot change the deterministic action, confidence, uncertainty, or hypothetical label. Provider failure falls back to the same grounded answer without disabling chat.
+Each intent retrieves only relevant league evidence. Deterministic answers remain available without OpenAI. Optional Responses API phrasing requires both `FANEDGE_AI_ENABLED=1` and a server key; it is bounded and falls back on errors. The heuristic phrasing check is not a proof against every possible hallucination, so the release candidate leaves it off. Weekly plans and trades remain deterministic.
 
 Conversation messages live in React memory and reset on league change or page reload. The backend retains only the previous classified intent and grounded answer in a bounded one-hour cache scoped to user/league/season/conversation ID. The reference UI retains its session-state conversation. Hypotheticals are visibly labeled and never mutate roster or decision memory. Analytics record only intent category, follow-up/hypothetical flags, support status, suggestion use, and evidence opens; raw question text and transcripts are not persisted. Current facts that are not supplied—such as weather—are explicitly unsupported rather than answered from model memory.
 
@@ -203,7 +214,7 @@ Legacy/reference only:
 streamlit run app.py
 ```
 
-The entire deterministic Sleeper experience, including grounded Ask FanEdge answers, works without an OpenAI key. AI-assisted phrasing and legacy explanation buttons require a key. Local intelligence memory defaults to `.fanedge/fanedge.db`; set `FANEDGE_DB_PATH` to use another development path.
+The deterministic experience works without an OpenAI key. Optional prose requires explicit opt-in plus a key. SQLite defaults to `.fanedge/fanedge.db`; `FANEDGE_DB_PATH` overrides it. Beta feedback/telemetry retention requires the documented daily maintenance command; it is not automatically scheduled. Start Uvicorn with `--no-access-log` to avoid recording query-string usernames in standard access logs.
 
 ## Deployment boundaries
 

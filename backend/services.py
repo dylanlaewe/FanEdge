@@ -6,6 +6,8 @@ import json
 import os
 import re
 from contextlib import contextmanager
+from contextvars import copy_context
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace, field
 from datetime import datetime, timezone
 from time import perf_counter
@@ -13,6 +15,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from backend.cache import TTLCache
+from beta_config import capabilities
 from backend.data_health import DataHealth, ProviderCache
 from copilot import CopilotEntityResolver, CopilotState, answer_query, classify_query
 from football_data import (
@@ -105,15 +108,18 @@ class IntelligenceService:
         self.repository = repository or SQLiteRepository(
             os.getenv("FANEDGE_DB_PATH", ".fanedge/fanedge.db")
         )
-        self.sleeper = sleeper or SleeperClient(timeout=20)
-        self.nflverse = nflverse or NflverseClient()
+        self.sleeper = sleeper or SleeperClient(timeout=10)
+        self.nflverse = nflverse or NflverseClient(timeout=8)
         self.news = news or ESPNNewsClient()
+        self.news_enabled = news is not None or capabilities()["news_enabled"]
         self.health = DataHealth()
         self.providers = ProviderCache(self.health)
         self.snapshots = TTLCache(32)
         self.conversations = TTLCache(256)
         self.trade_engines = TTLCache(8)
         self.trade_results = TTLCache(64)
+        self.ask_results = TTLCache(128)
+        self.dataset_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="fanedge-datasets")
         self.build_count = 0
 
     def close(self):
@@ -123,8 +129,10 @@ class IntelligenceService:
             self.conversations,
             self.trade_engines,
             self.trade_results,
+            self.ask_results,
         ):
             cache.close()
+        self.dataset_pool.shutdown(wait=True)
 
     def connect(self, username, *, refresh=False):
         normalized = username.strip().lower()
@@ -197,7 +205,7 @@ class IntelligenceService:
                 force=refresh,
             )
             metadata = self.providers.get(
-                "players", 3600, self.sleeper.get_players, force=refresh
+                "players", 86400, self.sleeper.get_players
             )
             raw = find_user_roster(rosters, str(user["user_id"]))
             roster = build_roster(raw, metadata)
@@ -236,36 +244,22 @@ class IntelligenceService:
                     )
                     schedule = build_weekly_schedule(rows, nfl_state)
 
+                    season = nfl_state.season
+                    # Fetch independent datasets in a bounded shared pool, outside
+                    # the indexes cache's single-flight lock (avoid nested-lock deadlock).
+                    jobs = [
+                        ("stats", season, 21600, self.nflverse.get_stat_rows, refresh),
+                        ("stats", season - 1, 86400, self.nflverse.get_stat_rows, False),
+                        ("snaps", season, 21600, self.nflverse.get_snap_rows, refresh),
+                        ("snaps", season - 1, 86400, self.nflverse.get_snap_rows, False),
+                        ("injuries", season, 3600, self.nflverse.get_injury_rows, refresh),
+                    ]
+                    futures = [self.dataset_pool.submit(copy_context().run, dataset, (kind, year), ttl,
+                        lambda fetch=fetch, year=year: fetch(year), force=force)
+                        for kind, year, ttl, fetch, force in jobs]
+                    current, prior, current_snaps, prior_snaps, reports = [f.result() for f in futures]
+
                     def indexes():
-                        season = nfl_state.season
-                        current = dataset(
-                            ("stats", season),
-                            21600,
-                            lambda: self.nflverse.get_stat_rows(season),
-                            force=refresh,
-                        )
-                        prior = dataset(
-                            ("stats", season - 1),
-                            86400,
-                            lambda: self.nflverse.get_stat_rows(season - 1),
-                        )
-                        current_snaps = dataset(
-                            ("snaps", season),
-                            21600,
-                            lambda: self.nflverse.get_snap_rows(season),
-                            force=refresh,
-                        )
-                        prior_snaps = dataset(
-                            ("snaps", season - 1),
-                            86400,
-                            lambda: self.nflverse.get_snap_rows(season - 1),
-                        )
-                        reports = dataset(
-                            ("injuries", season),
-                            3600,
-                            lambda: self.nflverse.get_injury_rows(season),
-                            force=refresh,
-                        )
                         scoring = league.get("scoring_settings") or {}
                         return (
                             build_performance_index(current, nfl_state, scoring),
@@ -408,6 +402,8 @@ class IntelligenceService:
             try:
 
                 def facts_factory():
+                    if not self.news_enabled:
+                        return ()
                     items = self.news.fetch()
                     return tuple(
                         reconcile_facts(
@@ -452,18 +448,23 @@ class IntelligenceService:
                 week=scope.week or None,
             )
         with timed("sqlite_memory"):
-            if not any("News refresh" in warning for warning in warnings):
+            if self.news_enabled and not any("News refresh" in warning for warning in warnings):
                 self.repository.save_news_facts(scope, news_result.relevant_facts)
+            memory_fresh = fresh and (self.news_enabled or not self.repository.load_news_facts(scope))
+            if not memory_fresh and fresh:
+                warnings.append("News is disabled; historical news-supported signals cannot be confirmed resolved.")
             memory = self.repository.reconcile(
-                scope, news_result.feed, data_fresh=fresh
+                scope, news_result.feed, data_fresh=memory_fresh
             )
             self.health.observe(
                 ("memory", scope.sleeper_user_id, league_id),
                 300,
                 memory.current,
+                # A deliberate optional-provider policy is not a failure of
+                # the current core datasets or the memory write itself.
                 failed=not fresh,
                 warning="Lifecycle resolution is paused while required evidence is incomplete."
-                if not fresh
+                if not memory_fresh
                 else None,
             )
             if fresh:
@@ -653,6 +654,11 @@ class IntelligenceService:
                 ("memory", snapshot.scope.sleeper_user_id, snapshot.scope.league_id),
             }
             rows += self.health.report(keys)
+        if not self.news_enabled:
+            for row in rows:
+                if row["dataset"] == "news_facts":
+                    row["status"] = "DISABLED"
+                    row["warnings"] = ["Optional news disabled by beta provider policy."]
         if not any(row["dataset"] == "calibration" for row in rows):
             rows.append(
                 {
@@ -702,6 +708,32 @@ class IntelligenceService:
                 snapshot.product = None
 
     def ask(
+        self, snapshot, question, conversation_id=None, suggested=False,
+        trade_preferences=None,
+    ):
+        # Identical in-flight/double-click requests share work, scoped to snapshot,
+        # conversation state and protections. Question text stays in bounded RAM only.
+        scope = snapshot.scope
+        with self.conversations.lock:
+            previous = self.conversations.entries.get(
+                (scope.sleeper_user_id, scope.league_id, scope.season, conversation_id)
+            ) if conversation_id else None
+        key = (snapshot.id, scope.sleeper_user_id, scope.league_id, conversation_id,
+               question, json.dumps(trade_preferences or {}, sort_keys=True))
+        base_key = key
+        # Do not reuse follow-up answers after a different preceding question.
+        if previous and previous.value[2] != question:
+            key += (previous.value[2],)
+        result = self.ask_results.get(key, 30, lambda: self._ask(
+            snapshot, question, conversation_id, suggested, trade_preferences
+        ))
+        # Once the conversation advances to this question, a repeated click no
+        # longer has the prior-question suffix. Reuse that exact completed answer.
+        if key != base_key:
+            self.ask_results.put(base_key, result, 30)
+        return result
+
+    def _ask(
         self,
         snapshot,
         question,
@@ -824,7 +856,8 @@ class IntelligenceService:
             )
         else:
             answer, _ = answer_query(
-                question, intent, state, previous_answer=previous[1]
+                question, intent, state, previous_answer=previous[1],
+                api_key=None if capabilities()["ai_enabled"] else "",
             )
         self.conversations.put(key, (intent, answer, question), 3600)
         self.repository.record_analytics(
@@ -835,6 +868,7 @@ class IntelligenceService:
                 "follow_up": intent.follow_up,
                 "hypothetical": intent.hypothetical,
                 "supported": not answer.unsupported,
+                "ai_fallback": answer.provider_fallback,
             },
         )
         if intent.follow_up:

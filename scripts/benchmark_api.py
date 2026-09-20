@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--trades", action="store_true")
     parser.add_argument("--copilot", action="store_true")
     args = parser.parse_args()
+    sizes = {}
 
     def fetch(path, body=None):
         start = perf_counter()
@@ -25,7 +26,9 @@ def main():
             headers={"Content-Type": "application/json"},
         )
         with urlopen(request, timeout=90) as response:
-            value = json.load(response)
+            raw = response.read()
+            value = json.loads(raw)
+            sizes[path.split("?")[0]] = {"json_bytes": len(raw), "server_timing": response.headers.get("Server-Timing")}
         return value, round((perf_counter() - start) * 1000, 3)
 
     leagues, connection_ms = fetch(f"/api/users/{quote(args.username)}/leagues")
@@ -35,6 +38,8 @@ def main():
         return f"/api/leagues/{league}/{route}?username={quote(args.username)}"
 
     snapshot, initial_ms = fetch(path("snapshot"))
+    if snapshot["starters"] and snapshot["starters"][0]["player"]:
+        fetch(path("players/" + snapshot["starters"][0]["player"]["id"]))
     results = {
         "connection_ms": connection_ms,
         "initial_snapshot_ms": initial_ms,
@@ -81,6 +86,7 @@ def main():
             "first_ms": values[0],
             "warm_median_ms": round(statistics.median(values[1:] or values), 3),
         }
+    results["payloads"] = sizes
     print(json.dumps(results, indent=2))
 
 

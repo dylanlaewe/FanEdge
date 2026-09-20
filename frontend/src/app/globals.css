@@ -3013,3 +3013,72 @@ small {
     height: calc(100dvh - 173px - env(safe-area-inset-bottom));
   }
 }
+.beta-panel {
+  margin: 32px 0 16px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.beta-panel > small {
+  display: block;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+.beta-panel summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  color: var(--text);
+}
+.beta-panel form {
+  max-width: 600px;
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+}
+.beta-panel label {
+  display: grid;
+  gap: 6px;
+}
+.beta-panel select,
+.beta-panel textarea {
+  width: 100%;
+  min-height: 44px;
+  background: #152031;
+  color: #eef3f7;
+  border: 1px solid #40516a;
+  border-radius: 8px;
+  padding: 10px;
+}
+.beta-panel textarea {
+  min-height: 88px;
+}
+.beta-helpful {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.beta-helpful button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.beta-helpful button[aria-pressed="true"] {
+  color: #caff6b;
+  border-color: #819e43;
+}
+.insight > .beta-helpful {
+  padding: 0 20px 12px;
+}
+.trade-intro h2 .badge {
+  font-size: 11px;
+  vertical-align: middle;
+  margin-left: 6px;
+}
