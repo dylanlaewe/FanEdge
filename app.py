@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -20,6 +21,8 @@ from intelligence import build_availability_changes, build_historical_index, bui
 from lineup_optimizer import LineupDecision, build_current_lineup, optimize_lineup
 from matchup import DefenseVsPosition, build_defense_vs_position
 from memory import FeedbackStatus, LeagueScope, Lifecycle, ReconciliationResult, TemporalOpportunity
+from news import ESPNNewsClient, NewsError, NewsFact, NewsItem, NewsEntityResolver, extract_facts, freshness_bucket, reconcile_facts
+from news_intelligence import NewsIntelligenceResult, integrate_news_intelligence
 from opportunity import PlayerOpportunity, build_opportunity_index, build_player_opportunities
 from opportunity_engine import FantasyOpportunity, build_opportunity_feed
 from outcomes import evaluate_pending_lineup_decisions
@@ -97,6 +100,12 @@ def cached_identities(players: dict[str, dict[str, Any]]) -> dict[str, PlayerIde
     return PlayerIdentityResolver(NflverseClient().get_player_rows()).resolve_all(players)
 
 
+@st.cache_data(ttl=900, max_entries=2, show_spinner=False)
+def cached_news_items() -> list[NewsItem]:
+    """One responsible batch request per cache window; never fetch article pages."""
+    return ESPNNewsClient().fetch()
+
+
 def scoring_label(league: dict[str, Any]) -> str:
     reception = (league.get("scoring_settings") or {}).get("rec", 0)
     if reception == 1:
@@ -157,6 +166,8 @@ def render_overview(
     memory: ReconciliationResult | None = None,
     repository: SQLiteRepository | None = None,
     scope: LeagueScope | None = None,
+    news_result: NewsIntelligenceResult | None = None,
+    news_uncertain: bool = False,
 ) -> None:
     week = f"Week {nfl_state.week}" if nfl_state else "This week"
     temporal = memory.current if memory else tuple(TemporalOpportunity(item, item.opportunity_id, Lifecycle.ACTIVE.value, "", "") for item in feed)
@@ -171,6 +182,8 @@ def render_overview(
     )
     if not data_available:
         st.info("Some weekly football data is unavailable. Unsupported conclusions are withheld.", icon=":material/info:")
+    if news_uncertain:
+        st.info("Current NFL reporting could not be refreshed. Last verified reports are preserved and marked as freshness-uncertain.", icon=":material/update:")
     if memory and memory.has_previous_snapshot:
         summary = memory.summary
         summary_items = [
@@ -197,13 +210,22 @@ def render_overview(
             st.caption("Freshness uncertain — the last verified evidence is preserved.")
         label = item.subject_player.name if item.subject_player else item.opportunity_type
         details = st.expander(f"Why this matters · {label}", key=f"explain_{temporal_item.event_key}", on_change="rerun")
-        if details.open:
-            if repository and scope and memory:
-                repository.record_analytics(scope, "explanation_opened", event_key=temporal_item.event_key, idempotency_key=f"explanation:{memory.snapshot_id}:{temporal_item.event_key}")
-            with details:
-                for fact in item.explanation_context:
-                    st.markdown(f"- {fact}")
-                st.caption(f"Action: {item.recommended_action.replace('_', ' ')} · Confidence: {item.confidence} · Relevance: {', '.join(item.relevance)}")
+        with details:
+            for fact in item.explanation_context:
+                st.markdown(f"- {fact}")
+            if news_result:
+                fact_index = {fact.fact_id: fact for fact in news_result.relevant_facts}
+                for fact_id in news_result.facts_for(item.opportunity_id):
+                    fact = fact_index.get(fact_id)
+                    if not fact:
+                        continue
+                    st.markdown(f"> {fact.evidence_text}")
+                    source = fact.sources[0] if fact.sources else "Source"
+                    reported = datetime.fromisoformat(fact.published_at.replace("Z", "+00:00")).strftime("%b %-d, %-I:%M %p UTC")
+                    st.caption(f"Source: {source} · Reported: {reported} · {fact.freshness.title()}")
+                    if fact.urls:
+                        st.link_button(f"Read on {source}", fact.urls[0], icon=":material/open_in_new:")
+            st.caption(f"Action: {item.recommended_action.replace('_', ' ')} · Confidence: {item.confidence} · Relevance: {', '.join(item.relevance)}")
         if repository and scope and temporal_item.lifecycle != Lifecycle.RESOLVED.value:
             if temporal_item.feedback:
                 st.caption(f"Journal status: {temporal_item.feedback.title()}")
@@ -222,8 +244,6 @@ def render_journal(repository: SQLiteRepository | None, scope: LeagueScope | Non
     if not repository or not scope:
         return
     history = st.expander("Decision journal", icon=":material/history:", key="decision_journal", on_change="rerun")
-    if not history.open:
-        return
     with history:
         entries = repository.journal(scope)
         if not entries:
@@ -340,18 +360,19 @@ def render_ask_fanedge(
     feed: list[FantasyOpportunity],
     repository: SQLiteRepository | None = None,
     scope: LeagueScope | None = None,
+    news_facts: tuple[NewsFact, ...] = (),
 ) -> None:
     st.html(
         '<section class="fe-ai-hero"><div><div class="fe-eyebrow">ASK FANEDGE</div><h1>Your league context, explained.</h1>'
-        '<p>FanEdge can turn the lineup, waiver, role, and availability evidence already calculated for your team into a concise weekly plan.</p></div>'
-        '<aside class="fe-capability"><strong>What this can do now</strong><br>Explain FanEdge decisions using your roster and verified evidence. It does not browse news, invent projections, or act like an open-ended chat assistant.</aside></section>'
+        '<p>FanEdge can turn lineup, waiver, role, availability, and relevant recent reporting into a concise weekly plan.</p></div>'
+        '<aside class="fe-capability"><strong>What this can do now</strong><br>Explain FanEdge decisions using your roster, verified evidence, and the cited recent reports supplied here. It cannot invent or search for missing news.</aside></section>'
     )
     st.html(section_title("Suggested questions"))
-    st.html(prompt_tiles(("What is the most important decision for my team this week?", "Why is FanEdge keeping my current lineup?", "Which waiver signal best fits my roster?")))
+    st.html(prompt_tiles(("What changed with my team today?", "Did any injuries create an opportunity?", "What should I monitor before kickoff?")))
     if st.button("Build my weekly strategy", type="primary", width="stretch", disabled=not has_openai_key, key="strategy_button"):
         try:
             with st.spinner("Building your weekly strategy…", show_time=True):
-                st.session_state.strategy = generate_strategy(roster, league, nfl_state=nfl_state, weekly_contexts=contexts, opportunity_feed=feed)
+                st.session_state.strategy = generate_strategy(roster, league, nfl_state=nfl_state, weekly_contexts=contexts, opportunity_feed=feed, news_facts=news_facts)
                 if repository and scope:
                     repository.record_analytics(scope, "ask_fanedge_used")
         except Exception:
@@ -448,6 +469,25 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
     settings = league.get("settings") if isinstance(league.get("settings"), dict) else {}
     scope_week = nfl_state.week if nfl_state else int(settings.get("leg") or 0)
     scope = LeagueScope(str(user["user_id"]), selected_id, scope_season, scope_week)
+    news_uncertain = False
+    news_fetch_succeeded = False
+    try:
+        raw_news = cached_news_items()
+        all_active_players = build_available_players(metadata, set())
+        resolved_news = NewsEntityResolver(all_active_players, identities).resolve_all(raw_news)
+        news_facts = tuple(reconcile_facts(extract_facts(resolved_news)))
+        news_fetch_succeeded = True
+    except NewsError:
+        news_uncertain = True
+        news_facts = tuple(replace(fact, freshness=freshness_bucket(fact.published_at), provider_fresh=False) for fact in repository.load_news_facts(scope))
+    news_result = integrate_news_intelligence(
+        opportunity_feed, news_facts, roster, contexts, available_players,
+        available_opportunities, available_profiles, profiles, roster_needs,
+        week=nfl_state.week if nfl_state else None,
+    )
+    if news_fetch_succeeded:
+        repository.save_news_facts(scope, news_result.relevant_facts)
+    opportunity_feed = list(news_result.feed)
     memory = repository.reconcile(scope, opportunity_feed, data_fresh=weekly_data_fresh)
     if weekly_data_fresh:
         evaluate_pending_lineup_decisions(repository, scope, scope_week, performances)
@@ -462,7 +502,7 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
             repository.record_analytics(scope, "overview_viewed", metadata={"items": len(memory.current)}, idempotency_key=f"overview:{memory.snapshot_id}")
             for item in memory.current:
                 repository.record_analytics(scope, "recommendation_viewed", event_key=item.event_key, metadata={"type": item.opportunity.opportunity_type}, idempotency_key=f"recommendation:{memory.snapshot_id}:{item.event_key}")
-        render_overview(league, nfl_state, opportunity_feed, identities, weekly_data_fresh, memory, repository, scope)
+        render_overview(league, nfl_state, opportunity_feed, identities, weekly_data_fresh, memory, repository, scope, news_result, news_uncertain)
     elif view == "My Team":
         if repository and scope and memory:
             for item in memory.current:
@@ -476,7 +516,7 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
                     repository.record_analytics(scope, "waiver_recommendation_viewed", event_key=item.event_key, idempotency_key=f"waiver-view:{memory.snapshot_id}:{item.event_key}")
         render_waivers(waiver_candidates, available_opportunities, identities, roster_needs, drop_candidates, has_openai_key, opportunity_feed)
     else:
-        render_ask_fanedge(roster, league, nfl_state, contexts, has_openai_key, opportunity_feed, repository, scope)
+        render_ask_fanedge(roster, league, nfl_state, contexts, has_openai_key, opportunity_feed, repository, scope, news_result.relevant_facts)
 
 
 try:

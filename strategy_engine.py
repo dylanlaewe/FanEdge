@@ -6,7 +6,7 @@ import os
 import re
 import json
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Iterable
 
 from openai import OpenAI
 
@@ -16,11 +16,12 @@ from waiver_engine import DropCandidate, RosterNeeds, WaiverCandidate
 from lineup_optimizer import LineupDecision, LineupSlot
 from opportunity import PlayerOpportunity
 from intelligence import RoleProfile
+from news import NewsFact
 
 
 SYSTEM_PROMPT = """You are FanEdge, an expert fantasy football strategist. Analyze the supplied fantasy roster, league, and weekly context. Be decisive, concise, and data-aware.
 
-Use ONLY the factual sports information supplied in the context. Never invent injuries, projections, opponents, statistics, matchups, or news. Missing or null data means unknown, not healthy, inactive, zero, or a bye. The deterministic opportunity feed is authoritative: explain its priorities, actions, relevance, and signals without creating new opportunities.
+Use ONLY the factual sports information supplied in the context. Never invent injuries, projections, opponents, statistics, matchups, or news. Recent-news knowledge from model memory is prohibited. A reported_news_fact is true only as an attributable report from its listed source and time; do not expand it beyond its evidence text. Missing or null data means unknown, not healthy, inactive, zero, or a bye. The deterministic opportunity feed is authoritative: explain its priorities, actions, relevance, and signals without creating new opportunities.
 
 Return EXACTLY 3 actionable recommendations:
 1. START/SIT — identify the most important lineup decision.
@@ -47,6 +48,7 @@ def build_roster_context(
     nfl_state: NFLState | None = None,
     weekly_contexts: dict[str, PlayerWeeklyContext] | None = None,
     opportunity_feed: list[Any] | None = None,
+    news_facts: Iterable[NewsFact] | None = None,
 ) -> dict[str, Any]:
     """Create a serializable context containing only data we actually know."""
     settings = league.get("settings") if isinstance(league.get("settings"), dict) else {}
@@ -73,7 +75,8 @@ def build_roster_context(
         "starters": [player_context(player) for player in roster.starters],
         "bench": [player_context(player) for player in roster.bench],
         "deterministic_opportunity_feed": [item.to_dict() for item in (opportunity_feed or [])],
-        "data_limits": "Null fields are unknown. No projections, waiver availability, or news is supplied.",
+        "reported_news_facts": [fact.to_dict() for fact in (news_facts or [])],
+        "data_limits": "Null fields are unknown. No projections are supplied. News claims are limited to reported_news_facts, their evidence excerpts, sources, and timestamps; model-memory news is prohibited.",
     }
 
 
@@ -202,6 +205,7 @@ def generate_strategy(
     nfl_state: NFLState | None = None,
     weekly_contexts: dict[str, PlayerWeeklyContext] | None = None,
     opportunity_feed: list[Any] | None = None,
+    news_facts: Iterable[NewsFact] | None = None,
     api_key: str | None = None,
     model: str = "gpt-4o-mini",
 ) -> list[dict[str, str]]:
@@ -210,7 +214,7 @@ def generate_strategy(
     if not key:
         raise ValueError("OPENAI_API_KEY is not configured.")
 
-    context = build_roster_context(roster, league, nfl_state, weekly_contexts, opportunity_feed)
+    context = build_roster_context(roster, league, nfl_state, weekly_contexts, opportunity_feed, news_facts)
     client = OpenAI(api_key=key)
     response = client.responses.create(
         model=model,

@@ -15,11 +15,12 @@ from memory import (
     TemporalOpportunity, TemporalSummary, classify_lifecycle, evidence_fingerprint,
     evidence_strength, feed_fingerprint, stable_event_key,
 )
+from news import NewsFact
 from opportunity_engine import FantasyOpportunity, Signal
 from sleeper_api import Player
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RESOLUTION_FRESH_MISSES = 2
 SENSITIVE_KEYS = {"secret", "token", "password", "api_key", "provider_payload", "authorization"}
 
@@ -129,6 +130,19 @@ CREATE TABLE IF NOT EXISTS analytics_events (
     metadata_json TEXT NOT NULL,
     occurred_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS news_fact_cache (
+    sleeper_user_id TEXT NOT NULL,
+    league_id TEXT NOT NULL,
+    season INTEGER NOT NULL,
+    fact_id TEXT NOT NULL,
+    fact_json TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    current INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (sleeper_user_id, league_id, season, fact_id)
+);
+CREATE INDEX IF NOT EXISTS idx_news_fact_scope
+ON news_fact_cache(sleeper_user_id, league_id, season, current, fetched_at DESC);
 """
 
 
@@ -197,6 +211,38 @@ class SQLiteRepository:
                 (scope.sleeper_user_id, scope.league_id, scope.season),
             ).fetchone()
         return int(row[0])
+
+    def save_news_facts(
+        self, scope: LeagueScope, facts: Iterable[NewsFact], *, fetched_at: str | None = None,
+    ) -> None:
+        """Persist normalized facts only; source article bodies are never stored."""
+        captured = fetched_at or utc_now()
+        values = tuple(facts)
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE news_fact_cache SET current=0 WHERE sleeper_user_id=?
+                AND league_id=? AND season=?""",
+                (scope.sleeper_user_id, scope.league_id, scope.season),
+            )
+            for fact in values:
+                connection.execute(
+                    """INSERT INTO news_fact_cache
+                    (sleeper_user_id, league_id, season, fact_id, fact_json, fetched_at, current)
+                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(sleeper_user_id, league_id, season, fact_id) DO UPDATE SET
+                    fact_json=excluded.fact_json, fetched_at=excluded.fetched_at, current=1""",
+                    (scope.sleeper_user_id, scope.league_id, scope.season, fact.fact_id, _json(fact.to_dict()), captured),
+                )
+
+    def load_news_facts(self, scope: LeagueScope) -> tuple[NewsFact, ...]:
+        """Return the last verified current fact set for provider-failure continuity."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT fact_json FROM news_fact_cache WHERE sleeper_user_id=?
+                AND league_id=? AND season=? AND current=1 ORDER BY fetched_at DESC, fact_id""",
+                (scope.sleeper_user_id, scope.league_id, scope.season),
+            ).fetchall()
+        return tuple(NewsFact.from_dict(json.loads(row["fact_json"])) for row in rows)
 
     def reconcile(
         self,

@@ -51,6 +51,8 @@ flowchart LR
 - `memory.py` defines stable event identity, meaningful-evidence fingerprints, lifecycle transitions, temporal summaries, feedback states, and neutral outcome classifications.
 - `storage.py` implements the replaceable persistence boundary with versioned SQLite schema initialization, scoped snapshots, current event state, decision records, feedback, outcomes, and local product analytics.
 - `outcomes.py` evaluates completed lineup comparisons from league-scored game results when both players' data is available.
+- `news.py` fetches one bounded NFL RSS batch, normalizes stories, resolves exact player/team identities, extracts source-bounded facts, and reconciles duplicates, contradictions, and freshness.
+- `news_intelligence.py` connects normalized facts to ownership, available teammates, role evidence, and roster need through an inspectable impact graph before extending the existing opportunity feed.
 
 ## Product experience
 
@@ -124,6 +126,18 @@ Weekly nflverse injury reports are compared by GSIS player, team, and position. 
 
 No external database or authentication is used in this MVP. Local SQLite supplies the initial memory architecture.
 
+## Personalized NFL news intelligence
+
+M10 adds current reporting as a separate evidence layer: **news → entity resolution → fact extraction → league relevance → corroboration → fantasy impact → action**. It does not add a generic news feed. A story is visible only when a resolved fact connects to the selected roster or to an available same-team, same-position player who already has independent structured role evidence.
+
+FanEdge uses ESPN's official NFL RSS feed at `https://www.espn.com/espn/rss/nfl/news`. ESPN explicitly publishes this feed for news-reader/syndication use. FanEdge retains the publisher, timestamp, canonical URL, and a short unchanged supporting excerpt, always links back to ESPN, and never fetches article pages. The implementation also evaluated NFL.com (its legacy `?service=rss` endpoint currently returns HTML), Yahoo Sports' valid but broad syndicated NFL RSS feed, PFF's analysis-oriented RSS feeds, and FantasySP's non-commercial aggregated feeds. ESPN alone was selected as the smallest timely default with clear machine-readable delivery; adding more sources would increase duplicate and licensing complexity without being necessary for the first milestone.
+
+Full player names resolve exactly. A surname resolves only when one explicit canonical team is present and that team has exactly one matching active fantasy player. Ambiguous mentions remain unresolved. Extraction is deterministic and intentionally narrow: explicit status, practice, transaction, and attributable coach-workload statements become normalized facts; predictions, implications, and unsupported speculation do not. Reported facts and FanEdge inferences remain separately labeled in every explanation.
+
+Equivalent reports collapse into one fact while preserving their source references. Conflicts retain superseded fact IDs, prefer current over stale information, and then prefer explicit and more authoritative reporting. Freshness is deterministic: `BREAKING` through two hours, `RECENT` through 48 hours, and `STALE` afterward. Stale facts cannot create new user-facing impact events.
+
+The feed is fetched as one batch and cached by Streamlit for 15 minutes. Normalized facts—not article bodies—are persisted in SQLite per user/league/season. If the provider fails, FanEdge reuses the last verified fact set, marks reporting freshness uncertain, and continues running all structured football intelligence. A provider failure is never interpreted as “no news.” Ask FanEdge receives only the relevant normalized news facts already supplied in context and is explicitly prohibited from using model-memory news.
+
 ## Tech stack
 
 Python 3.11+, Streamlit, Requests, OpenAI Python SDK, python-dotenv, Sleeper's public API, and nflverse release data.
@@ -175,7 +189,7 @@ Streamlit Community Cloud local disk is not durable across redeployments and may
 - Cross-provider identity resolution is intentionally conservative. Unresolved or ambiguous players retain schedule/status context but do not inherit another player's statistics.
 - Lineup recommendations use completed games and current availability, not future-point projections. Early-season samples are therefore intentionally conservative.
 - Custom offensive scoring bonuses or unsupported scoring keys disable performance averages rather than showing inaccurate points.
-- No projections, trade values, or news are supplied. Waiver availability is based only on Sleeper league ownership, and the model is explicitly told not to invent unavailable facts.
+- No projections or trade values are supplied. Current reporting is limited to resolved facts in ESPN's NFL RSS batch; missing coverage is unknown, and the model is explicitly prohibited from inventing unavailable news.
 - The current season is selected automatically. Historical-season selection is not yet exposed.
 - League co-owners are not currently resolved as roster owners.
 

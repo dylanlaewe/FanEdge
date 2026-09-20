@@ -28,7 +28,7 @@ def scope():
 
 
 def test_schema_initializes_and_duplicate_snapshot_is_idempotent(repository, scope):
-    assert repository.schema_version() == 1
+    assert repository.schema_version() == 2
     first = repository.reconcile(scope, [item()], data_fresh=True, captured_at="2026-09-01T12:00:00+00:00")
     second = repository.reconcile(scope, [item()], data_fresh=True, captured_at="2026-09-01T12:05:00+00:00")
     assert first.current[0].lifecycle == Lifecycle.NEW
