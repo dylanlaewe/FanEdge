@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
+from functools import lru_cache
 from typing import Any, Iterable
 
 import requests
@@ -240,6 +241,7 @@ class NewsEntityResolver:
         self.identities = identities or {}
 
     @staticmethod
+    @lru_cache(maxsize=4096)
     def _name_pattern(name: str) -> re.Pattern[str]:
         tokens = re.findall(r"[A-Za-z0-9]+", name)
         return re.compile(r"(?<!\w)" + r"[\s.'’-]+".join(re.escape(token) for token in tokens) + r"(?!\w)", re.I)

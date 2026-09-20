@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import os
-from dataclasses import replace
 from datetime import datetime
 from html import escape
-from pathlib import Path
 from typing import Any
 
 import streamlit as st
 from dotenv import load_dotenv
+from backend.services import IntelligenceService
 
 from components import opportunity_card, page_header, player_row, section_title, swap_comparison, topbar, waiver_row
 from copilot import (
@@ -18,26 +17,20 @@ from copilot import (
     classify_query, contextual_suggestions,
 )
 from football_data import (
-    FootballDataError, NFLState, NflverseClient, PlayerWeeklyContext, WeeklySchedule,
-    build_performance_index, build_player_weekly_contexts, build_weekly_schedule, normalize_nfl_state,
+    FootballDataError, NFLState, PlayerWeeklyContext, normalize_nfl_state,
 )
-from intelligence import build_availability_changes, build_historical_index, build_participation_index, build_role_profiles
-from lineup_optimizer import LineupDecision, build_current_lineup, optimize_lineup
-from matchup import DefenseVsPosition, build_defense_vs_position
+from lineup_optimizer import LineupDecision
 from memory import FeedbackStatus, LeagueScope, Lifecycle, ReconciliationResult, TemporalOpportunity
-from news import ESPNNewsClient, NewsError, NewsItem, NewsEntityResolver, extract_facts, freshness_bucket, reconcile_facts
-from news_intelligence import NewsIntelligenceResult, integrate_news_intelligence
-from opportunity import PlayerOpportunity, build_opportunity_index, build_player_opportunities
-from opportunity_engine import FantasyOpportunity, build_opportunity_feed
-from outcomes import evaluate_pending_lineup_decisions
-from player_identity import PlayerIdentity, PlayerIdentityResolver
-from sleeper_api import Roster, SleeperAPIError, SleeperClient, build_roster, find_user_roster
+from news_intelligence import NewsIntelligenceResult
+from opportunity import PlayerOpportunity
+from opportunity_engine import FantasyOpportunity
+from player_identity import PlayerIdentity
+from sleeper_api import Roster, SleeperAPIError, SleeperClient
 from storage import SQLiteRepository
 from strategy_engine import generate_lineup_advice, generate_waiver_advice
 from styles import APP_CSS
 from waiver_engine import (
-    WaiverCandidate, analyze_roster_needs, build_available_players, build_rostered_player_ids,
-    find_drop_candidates, rank_waiver_candidates,
+    WaiverCandidate,
 )
 
 load_dotenv()
@@ -46,8 +39,8 @@ st.html(APP_CSS)
 
 
 @st.cache_resource
-def memory_repository(path: str) -> SQLiteRepository:
-    return SQLiteRepository(path)
+def intelligence_service() -> IntelligenceService:
+    return IntelligenceService()
 
 
 def current_nfl_season(now: datetime | None = None) -> int:
@@ -55,59 +48,13 @@ def current_nfl_season(now: datetime | None = None) -> int:
     return today.year - 1 if today.month <= 2 else today.year
 
 
-@st.cache_data(ttl=900, show_spinner=False)
 def cached_user_and_leagues(username: str, season: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    client = SleeperClient()
-    user = client.get_user(username)
-    return user, client.get_leagues(str(user["user_id"]), season)
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def cached_rosters(league_id: str) -> list[dict[str, Any]]:
-    return SleeperClient().get_rosters(league_id)
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def cached_players() -> dict[str, dict[str, Any]]:
-    return SleeperClient(timeout=30).get_players()
+    return intelligence_service().connect(username)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_nfl_state() -> NFLState:
     return normalize_nfl_state(SleeperClient().get_nfl_state())
-
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def cached_weekly_schedule(state: NFLState) -> WeeklySchedule:
-    return build_weekly_schedule(NflverseClient().get_schedule_rows(), state)
-
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def cached_weekly_indexes(state: NFLState, scoring: dict[str, Any]) -> tuple[Any, ...]:
-    client = NflverseClient()
-    rows = client.get_stat_rows(state.season)
-    prior_rows = client.get_stat_rows(state.season - 1)
-    return (
-        build_performance_index(rows, state, scoring),
-        build_opportunity_index(rows, state),
-        build_defense_vs_position(rows, state, scoring, prior_rows),
-        build_historical_index(prior_rows, state.season - 1, scoring),
-        build_participation_index(client.get_snap_rows(state.season), state),
-        build_participation_index(client.get_snap_rows(state.season - 1), NFLState(state.season - 1, 99, "regular")),
-        build_availability_changes(client.get_injury_rows(state.season), state),
-        {},  # No trustworthy historical depth-chart snapshots.
-    )
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def cached_identities(players: dict[str, dict[str, Any]]) -> dict[str, PlayerIdentity]:
-    return PlayerIdentityResolver(NflverseClient().get_player_rows()).resolve_all(players)
-
-
-@st.cache_data(ttl=900, max_entries=2, show_spinner=False)
-def cached_news_items() -> list[NewsItem]:
-    """One responsible batch request per cache window; never fetch article pages."""
-    return ESPNNewsClient().fetch()
 
 
 def scoring_label(league: dict[str, Any]) -> str:
@@ -243,8 +190,7 @@ def render_overview(
             with st.container(horizontal=True, gap="small"):
                 for status, icon in ((FeedbackStatus.DONE, ":material/check:"), (FeedbackStatus.SAVED, ":material/bookmark:"), (FeedbackStatus.DISMISSED, ":material/close:")):
                     if st.button(status.value.title(), icon=icon, key=f"feedback_{status.value}_{temporal_item.event_key}"):
-                        repository.record_feedback(scope, temporal_item.event_key, status.value)
-                        repository.record_analytics(scope, f"recommendation_{status.value.lower()}", event_key=temporal_item.event_key)
+                        intelligence_service().record_feedback(scope, temporal_item.event_key, status.value)
                         st.toast(f"Recommendation {status.value.lower()}.", icon=icon)
                         st.rerun()
     st.html('</div>')
@@ -513,126 +459,35 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
     else:
         selected_id = preview_id
     league = league_by_id[selected_id]
-    if st.session_state.get("selected_league_id") != selected_id or "roster" not in st.session_state or "raw_roster" not in st.session_state:
-        for key in ("roster", "strategy", "waiver_advice", "lineup_advice"):
-            st.session_state.pop(key, None)
-        try:
-            with st.spinner("Importing your roster…", show_time=True):
-                raw = find_user_roster(cached_rosters(selected_id), str(user["user_id"]))
-                st.session_state.roster = build_roster(raw, cached_players())
-                st.session_state.raw_roster = raw
-                st.session_state.selected_league_id = selected_id
-            st.rerun()
-        except SleeperAPIError as exc:
-            st.error(str(exc), icon=":material/error:")
-            return
-    roster: Roster | None = st.session_state.get("roster")
-    if not roster:
+    service = intelligence_service()
+    try:
+        with st.spinner("Preparing league intelligence…"):
+            snapshot, cache_status = service.get_snapshot(str(user.get("username") or username), selected_id)
+    except (SleeperAPIError, FootballDataError, ValueError) as exc:
+        st.error(str(exc))
         return
-    metadata = cached_players()
-    league_rosters = cached_rosters(selected_id)
-    schedule: WeeklySchedule | dict[str, Any] = WeeklySchedule({}, False, ("schedule unavailable",))
-    performances: dict[Any, Any] = {}
-    opportunity_index: dict[Any, Any] = {}
-    matchup_index: dict[tuple[str, str], DefenseVsPosition] = {}
-    historical_index: dict[Any, Any] = {}
-    participation_index: dict[Any, Any] = {}
-    historical_participation: dict[Any, Any] = {}
-    availability_index: dict[Any, Any] = {}
-    depth_ranks: dict[str, int] = {}
-    weekly_data_fresh = False
-    if nfl_state:
-        with st.status(f"Preparing Week {nfl_state.week}", expanded=False) as load_status:
-            try:
-                schedule = cached_weekly_schedule(nfl_state)
-                performances, opportunity_index, matchup_index, historical_index, participation_index, historical_participation, availability_index, depth_ranks = cached_weekly_indexes(nfl_state, league.get("scoring_settings") or {})
-                weekly_data_fresh = bool(schedule.complete)
-                load_status.update(label="Week intelligence ready", state="complete")
-            except FootballDataError:
-                load_status.update(label="Some weekly evidence is unavailable", state="error")
-    try:
-        identities = cached_identities(metadata)
-    except FootballDataError:
-        identities = {}
-        weekly_data_fresh = False
-    contexts = build_player_weekly_contexts(roster, metadata, schedule, performances, identities=identities)
-    opportunities = build_player_opportunities((*roster.starters, *roster.bench), opportunity_index, identities)
-    profiles = build_role_profiles((*roster.starters, *roster.bench), opportunities, identities, historical_index, participation_index, availability_index, depth_ranks, historical_participation)
-    lineup_slots = build_current_lineup(st.session_state.raw_roster, metadata, league.get("roster_positions") or [])
-    decisions, lineup_health = optimize_lineup(lineup_slots, roster, contexts, opportunities, matchup_index, {player_id: bool(identity.gsis_id) for player_id, identity in identities.items()}, profiles)
-    owned_ids = build_rostered_player_ids(league_rosters)
-    available_players = build_available_players(metadata, owned_ids)
-    available_contexts = build_player_weekly_contexts(Roster(starters=available_players, bench=[]), metadata, schedule, performances, identities=identities)
-    roster_needs = analyze_roster_needs(roster, contexts)
-    available_opportunities = build_player_opportunities(available_players, opportunity_index, identities)
-    available_profiles = build_role_profiles(available_players, available_opportunities, identities, historical_index, participation_index, availability_index, depth_ranks, historical_participation)
-    waiver_candidates = rank_waiver_candidates(available_players, available_contexts, roster_needs, opportunities=available_opportunities, profiles=available_profiles)
-    drop_candidates = find_drop_candidates(roster, contexts, roster_needs)
-    opportunity_feed = build_opportunity_feed(
-        roster, contexts, opportunities, profiles, lineup_slots, decisions,
-        waiver_candidates, available_opportunities, roster_needs, matchup_index,
-        week=nfl_state.week if nfl_state else None,
-    )
-    repository: SQLiteRepository | None = None
-    scope: LeagueScope | None = None
-    memory: ReconciliationResult | None = None
-    database_path = os.getenv("FANEDGE_DB_PATH") or str(Path(".fanedge") / "fanedge.db")
-    repository = memory_repository(database_path)
-    scope_season = nfl_state.season if nfl_state else int(league.get("season") or current_nfl_season())
-    settings = league.get("settings") if isinstance(league.get("settings"), dict) else {}
-    scope_week = nfl_state.week if nfl_state else int(settings.get("leg") or 0)
-    scope = LeagueScope(str(user["user_id"]), selected_id, scope_season, scope_week)
-    news_uncertain = False
-    news_fetch_succeeded = False
-    all_active_players = build_available_players(metadata, set())
-    try:
-        raw_news = cached_news_items()
-        resolved_news = NewsEntityResolver(all_active_players, identities).resolve_all(raw_news)
-        news_facts = tuple(reconcile_facts(extract_facts(resolved_news)))
-        news_fetch_succeeded = True
-    except NewsError:
-        news_uncertain = True
-        news_facts = tuple(replace(fact, freshness=freshness_bucket(fact.published_at), provider_fresh=False) for fact in repository.load_news_facts(scope))
-    news_result = integrate_news_intelligence(
-        opportunity_feed, news_facts, roster, contexts, available_players,
-        available_opportunities, available_profiles, profiles, roster_needs,
-        week=nfl_state.week if nfl_state else None,
-    )
-    if news_fetch_succeeded:
-        repository.save_news_facts(scope, news_result.relevant_facts)
-    opportunity_feed = list(news_result.feed)
-    memory = repository.reconcile(scope, opportunity_feed, data_fresh=weekly_data_fresh)
-    if weekly_data_fresh:
-        evaluate_pending_lineup_decisions(repository, scope, scope_week, performances)
-    repository.record_analytics(
-        scope, "league_connected",
-        idempotency_key=f"league-connected:{scope.sleeper_user_id}:{scope.league_id}:{scope.season}",
-    )
+    state = snapshot.state
+    st.session_state.selected_league_id = selected_id
+    roster, contexts, opportunities, profiles = state.roster, state.contexts, state.opportunities, state.profiles
+    lineup_slots, decisions, identities = state.lineup_slots, state.lineup_decisions, state.identities
+    waiver_candidates, drop_candidates, roster_needs = state.waiver_candidates, state.drop_candidates, state.roster_needs
+    available_opportunities = opportunities
+    opportunity_feed, memory = list(state.opportunity_feed), state.memory
+    repository, scope = service.repository, snapshot.scope
+    news_result, news_uncertain = snapshot.news_result, any("News" in warning for warning in snapshot.warnings)
+    weekly_data_fresh, nfl_state = snapshot.data_fresh, snapshot.nfl_state
+    copilot_state = state
     has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
-    combined_contexts = {**available_contexts, **contexts}
-    combined_opportunities = {**available_opportunities, **opportunities}
-    combined_profiles = {**available_profiles, **profiles}
-    league_players = tuple(player for player in all_active_players if player.player_id in owned_ids)
-    copilot_state = CopilotState(
-        roster=roster,
-        league=league,
-        contexts=combined_contexts,
-        opportunities=combined_opportunities,
-        profiles=combined_profiles,
-        lineup_slots=tuple(lineup_slots),
-        lineup_decisions=tuple(decisions),
-        waiver_candidates=tuple(waiver_candidates),
-        drop_candidates=tuple(drop_candidates),
-        roster_needs=roster_needs,
-        opportunity_feed=tuple(opportunity_feed),
-        memory=memory,
-        news_facts=tuple(news_result.relevant_facts),
-        matchup_index=matchup_index,
-        identities=identities,
-        league_players=league_players,
-        active_players=tuple(all_active_players),
-        scoring_label=scoring_label(league),
-    )
+    st.caption("Legacy reference interface · Next.js is the primary FanEdge product.")
+    if st.button("Refresh league data", key="refresh_reference"):
+        service.get_snapshot(str(user.get("username") or username), selected_id, refresh=True)
+        st.rerun()
+    if cache_status["refreshing"]:
+        st.caption("Refreshing in the background; showing your last complete snapshot.")
+    if cache_status["refresh_error"]:
+        st.warning(cache_status["refresh_error"])
+    for warning in snapshot.warnings:
+        st.caption(warning)
     view = st.session_state.application_nav
     if view == "Overview":
         if repository and scope and memory:

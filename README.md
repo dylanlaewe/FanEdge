@@ -2,6 +2,8 @@
 
 FanEdge is an AI-powered fantasy football strategist for real Sleeper leagues. It combines exact league ownership, completed-game production, roster construction, and constrained AI explanation.
 
+**M12 product:** Next.js / React / TypeScript frontend + FastAPI + the existing Python intelligence engine. Streamlit is retained as a **legacy/reference UI**, not the product frontend. See [the migration and measured performance report](docs/M12_MIGRATION.md).
+
 ## MVP functionality
 
 - Resolves a Sleeper username and loads the user's current-season NFL leagues
@@ -25,21 +27,20 @@ FanEdge is an AI-powered fantasy football strategist for real Sleeper leagues. I
 
 ```mermaid
 flowchart LR
-    U[Streamlit UI] --> S[SleeperClient]
-    U --> C[Copilot router + tools]
-    C --> M[League intelligence state]
+    U[Next.js + React Query] --> A[FastAPI typed product contracts]
+    A --> S[Shared IntelligenceService]
+    L[Legacy Streamlit] --> S
+    S --> M[Cached LeagueIntelligenceSnapshot]
+    S --> D[Existing Python domain engines]
+    S --> P[Sleeper / nflverse / ESPN]
+    S --> DB[SQLite memory]
+    S --> C[Existing copilot router + tools]
     C -. optional phrasing .-> O[OpenAI Responses API]
-    S --> A[Sleeper public API]
-    U --> E[Strategy engine]
-    E --> O[OpenAI Responses API]
-    S --> N[Roster normalization]
-    N --> U
-    S --> W[Waiver engine]
-    W --> U
-    W --> E
 ```
 
-- `app.py` owns the Streamlit UI, caching, and session state.
+- `frontend/` owns the App Router product shell, responsive React primitives, browser query cache, and Playwright tests. It performs no football calculations.
+- `backend/services.py` owns shared snapshot construction, provider caches, and scoped copilot context. `backend/main.py` exposes thin API routes; `schemas.py` and `presenter.py` define normalized product contracts.
+- `app.py` retains the Streamlit reference UI and consumes the same shared service.
 - `sleeper_api.py` provides defensive HTTP access and converts Sleeper IDs into display-ready roster objects.
 - `strategy_engine.py` creates a factual roster context, calls OpenAI, and parses the required recommendations.
 - `football_data.py` normalizes Sleeper state/status plus nflverse schedule and completed-game statistics into provider-neutral weekly context.
@@ -60,9 +61,9 @@ flowchart LR
 
 ## Product experience
 
-The connected experience is organized as a responsive fantasy application around four weekly jobs: **Overview**, **My Team**, **Waivers**, and **Ask FanEdge**. Desktop uses persistent left navigation; mobile converts it to a compact bottom bar. Overview is now **Your Edge**, a proactive feed of the highest-priority changes that matter to the selected manager. My Team renders the league's real starting slots and bench as information-dense player rows, with position-specific production and workload signals. Waivers keeps its deterministic ranking and elevates players with corroborated opportunity events. Ask FanEdge is a session-based league copilot that routes questions to the same deterministic intelligence and exposes its evidence; it cannot create opportunities or invent unavailable facts.
+The connected experience has four destinations: **Home**, **Team**, **Market**, and **Ask FanEdge**. Desktop uses persistent left navigation; mobile has a bottom bar. Home is **Your Edge**, a personalized feed with evidence, news, feedback, and decision history. Team renders actual starting slots and bench in compact rows and shows lineup comparisons. Market separates qualified waiver candidates from watchlist signals, with position/search filters. Clicking a player opens a detail drawer without leaving the page. Ask FanEdge supports structured player/action/evidence responses and scoped follow-ups.
 
-Presentation is split into `styles.py` and reusable sports components in `components.py`; `app.py` remains responsible for data orchestration and page composition. The redesign does not change the lineup optimizer, waiver ranking, schedule inference, identity matching, or role model.
+Next.js presentation is built from scratch in `frontend/src/components/` and `frontend/src/app/globals.css`, not copied from Streamlit markup or styles. `styles.py` and `components.py` serve only the reference UI. Neither frontend owns lineup, waiver, schedule, identity, or role calculations.
 
 The dashboard intentionally computes the intelligence batch once, then lets the user move between views without per-player HTTP calls. Missing or unsupported data is shown as an explicit limitation; it is never converted into a negative recommendation.
 
@@ -140,7 +141,7 @@ Full player names resolve exactly. A surname resolves only when one explicit can
 
 Equivalent reports collapse into one fact while preserving their source references. Conflicts retain superseded fact IDs, prefer current over stale information, and then prefer explicit and more authoritative reporting. Freshness is deterministic: `BREAKING` through two hours, `RECENT` through 48 hours, and `STALE` afterward. Stale facts cannot create new user-facing impact events.
 
-The feed is fetched as one batch and cached by Streamlit for 15 minutes. Normalized facts—not article bodies—are persisted in SQLite per user/league/season. If the provider fails, FanEdge reuses the last verified fact set, marks reporting freshness uncertain, and continues running all structured football intelligence. A provider failure is never interpreted as “no news.” Ask FanEdge receives only the relevant normalized news facts already supplied in context and is explicitly prohibited from using model-memory news.
+The feed is fetched as one batch and its resolved facts are cached by the shared backend for 15 minutes. Normalized facts—not article bodies—are persisted in SQLite per user/league/season. If the provider fails, FanEdge reuses the last verified fact set, marks reporting freshness uncertain, and continues running all structured football intelligence. A provider failure is never interpreted as “no news.” Ask FanEdge receives only the relevant normalized news facts already supplied in context and is explicitly prohibited from using model-memory news.
 
 ## Ask FanEdge V2
 
@@ -148,11 +149,11 @@ M11 turns Ask FanEdge into a league-aware, multi-turn copilot rather than a gene
 
 Each intent calls only the internal capabilities it needs—for example, waiver questions retrieve confirmed available candidates, roster needs, and conservative drop options, while a player question retrieves that player's weekly context, role, opportunity, matchup, news, and surfaced events. The deterministic answer is always available. When an OpenAI key is configured, the Responses API may improve phrasing under a strict supplied-context contract, but it cannot change the deterministic action, confidence, uncertainty, or hypothetical label. Provider failure falls back to the same grounded answer without disabling chat.
 
-The conversation lives only in Streamlit session state and resets when the selected league changes. Hypotheticals are visibly labeled and never mutate roster or decision memory. Analytics record only intent category, follow-up/hypothetical flags, support status, suggestion use, and evidence opens; raw question text and transcripts are not persisted. Current facts that are not supplied—such as weather—are explicitly unsupported rather than answered from model memory.
+Conversation messages live in React memory and reset on league change or page reload. The backend retains only the previous classified intent and grounded answer in a bounded one-hour cache scoped to user/league/season/conversation ID. The reference UI retains its session-state conversation. Hypotheticals are visibly labeled and never mutate roster or decision memory. Analytics record only intent category, follow-up/hypothetical flags, support status, suggestion use, and evidence opens; raw question text and transcripts are not persisted. Current facts that are not supplied—such as weather—are explicitly unsupported rather than answered from model memory.
 
 ## Tech stack
 
-Python 3.11+, Streamlit, Requests, OpenAI Python SDK, python-dotenv, Sleeper's public API, and nflverse release data.
+Python 3.11+, FastAPI, Pydantic, Uvicorn, Next.js 16, React 19, TypeScript, Tailwind CSS 4, TanStack Query, Lucide, SQLite, Requests, OpenAI Python SDK, python-dotenv, Sleeper, nflverse, and ESPN RSS. Streamlit is the legacy/reference runtime. Node.js 20.9+ is required for Next.js.
 
 ## Run locally
 
@@ -171,7 +172,24 @@ Add your key to `.env`:
 OPENAI_API_KEY=your_key_here
 ```
 
-Then launch the app:
+Launch the backend in one terminal:
+
+```bash
+source .venv/bin/activate
+uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+Launch the product frontend in another:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:3000`. API docs: `http://127.0.0.1:8000/docs`; health: `http://127.0.0.1:8000/health`. For a production build, use `npm run build` then `npm run start` in `frontend/`. `FANEDGE_API_URL` sets the server-side API proxy target (default `http://127.0.0.1:8000`); set it when building and running Next.js. Never place an OpenAI key in a `NEXT_PUBLIC_` variable.
+
+Legacy/reference only:
 
 ```bash
 streamlit run app.py
@@ -179,7 +197,11 @@ streamlit run app.py
 
 The entire deterministic Sleeper experience, including grounded Ask FanEdge answers, works without an OpenAI key. AI-assisted phrasing and legacy explanation buttons require a key. Local intelligence memory defaults to `.fanedge/fanedge.db`; set `FANEDGE_DB_PATH` to use another development path.
 
-## Deploy to Streamlit Community Cloud
+## Deployment boundaries
+
+The new product needs a Node.js Next.js process plus an ASGI FastAPI process and persistent SQLite storage. Use one backend worker for the current in-process cache/session design. Keep the backend private behind the Next.js proxy. This milestone does not add authentication or a public-hosting security boundary; do not expose journal/feedback APIs as a multi-user public service without that work. No cloud deployment is performed by this migration.
+
+### Legacy Streamlit Community Cloud
 
 1. Push this repository to GitHub.
 2. In Streamlit Community Cloud, create an app from the repository and set the entry point to `app.py`.
@@ -207,7 +229,19 @@ Streamlit Community Cloud local disk is not durable across redeployments and may
 
 ## Roadmap
 
-- Add trustworthy projections and deeper usage signals
-- Support weekly lineup slots and player-level projections
-- Replace local SQLite with durable hosted persistence when production identity and deployment requirements are defined
-- Expand to trades, multi-league dashboards, and additional fantasy platforms
+M12 is the performance and product-shell migration, not a beta launch. Trade Finder, projections, notifications, authentication, payments, social, and weather remain explicitly deferred. No subsequent feature milestone has begun.
+
+## Validation
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+cd frontend
+npm ci
+npm run build
+npm run typecheck
+npx playwright install chromium
+npm test
+```
+
+The frontend suite starts a local production Next.js server if one is not already running. Its default flows use fixtures; `FANEDGE_LIVE=1 npm test` additionally exercises a populated real league against the running FastAPI backend. Profiling/parity scripts and results are documented in [M12_MIGRATION.md](docs/M12_MIGRATION.md).
