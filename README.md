@@ -2,7 +2,11 @@
 
 FanEdge is an AI-powered fantasy football strategist for real Sleeper leagues. It combines exact league ownership, completed-game production, roster construction, and constrained AI explanation.
 
-**M13 product:** Next.js / React / TypeScript frontend + FastAPI + the existing Python intelligence engine, now with **league-wide trade discovery** in Market → Trades and Ask FanEdge. Streamlit is retained as a **legacy/reference UI**, not the product frontend. See [the trade model, candid real-league audit, and measurements](docs/M13_TRADES.md) and [the M12 migration report](docs/M12_MIGRATION.md).
+**M14 product:** Next.js / React / TypeScript frontend + FastAPI + the existing Python intelligence engine, now with evidence tiers, trade rejection diagnostics, unified deterministic Ask planning and centralized data health. Streamlit remains a **legacy/reference UI**, not the product frontend. Read the [M14 calibration research and candid league audit](docs/M14_CALIBRATION.md), [quality scorecard](docs/QUALITY_SCORECARD.md), [M13 trade model](docs/M13_TRADES.md) and [M12 migration report](docs/M12_MIGRATION.md).
+
+M14 does not claim market-price accuracy. Default trade searches can legitimately be empty. Optional Fantasy Football Calculator draft-sentiment calibration is disabled; explicitly set `FANEDGE_MARKET_ADP_ENABLED=1` to enable its conservative date/format/sample/identity gates. It is not a rest-of-season value feed. See the research report for attribution and provider-rights blockers before commercial beta.
+
+Developer diagnostics: `GET /api/health/data`, scoped `GET /api/leagues/{id}/health/data?username=...`, and `POST /api/leagues/{id}/trades/diagnostics?username=...` with normal trade-search options. Health reports process observations, not guaranteed provider SLAs. Real-provider audit: `.venv/bin/python scripts/audit_quality.py --username YOUR_USERNAME --output /tmp/fanedge-quality.json`; this uses a temporary journal, no roster mutations. Performance: `.venv/bin/python scripts/benchmark_api.py --trades --copilot` against a running API.
 
 ## MVP functionality
 

@@ -219,27 +219,13 @@ def present(snapshot, repository):
                 feedback=temporal.feedback,
             )
         )
-    add_ids = {
-        item.subject_player.player_id
-        for item in state.opportunity_feed
-        if item.subject_player
-        and item.opportunity_type in {"WAIVER_OPPORTUNITY", "BREAKOUT_WATCH"}
-    }
-    # Preserve the reference UI's top-add qualification, then surface news-supported watches.
+    from quality import waiver_is_actionable
+
+    # A strong role alone is a watch, not a league-specific call to add.
     waivers = []
     seen = set()
     for index, item in enumerate(state.waiver_candidates):
-        is_add = item.player.player_id in add_ids or bool(
-            item.intelligence
-            and (
-                item.intelligence.role in {"FEATURED", "STARTER", "EMERGING"}
-                or any(
-                    reason
-                    in {"Opportunity rising", "Role expanding", "Snap share rising"}
-                    for reason in item.reasons
-                )
-            )
-        )
+        is_add = waiver_is_actionable(item, state)
         waivers.append(
             api.WaiverCandidate(
                 player=p(item.player),

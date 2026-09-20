@@ -171,6 +171,7 @@ class CopilotRequest(BaseModel):
 
 
 class CopilotResponse(BaseModel):
+    plan: dict | None = None
     conversation_id: str
     model_text: str | None = None
     answer: str
@@ -249,6 +250,8 @@ class RelativePlayerValue(BaseModel):
     supported: bool
     available: bool
     reasons: list[str]
+    tier: str = "SPECULATIVE"
+    market_evidence: dict | None = None
 
 
 class TradeOverview(BaseModel):
@@ -338,6 +341,7 @@ class TradeAnalysis(BaseModel):
     rejections: list[str]
     idea: TradeIdea | None
     players: dict[str, Player] = Field(default_factory=dict)
+    codes: list[str] = Field(default_factory=list)
 
 
 CopilotRequest.model_rebuild()

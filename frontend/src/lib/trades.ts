@@ -49,6 +49,15 @@ export type TradeOverview = {
       available: boolean;
       supported: boolean;
       confidence: string;
+      tier?: string;
+      market_evidence?: {
+        source: string;
+        url: string;
+        as_of: string;
+        kind: string;
+        adp: number;
+        samples: number;
+      } | null;
       reasons: string[];
     }
   >;
@@ -89,6 +98,7 @@ export type TradeSearch = {
   model_version: string;
 };
 export type TradeAnalysis = {
+  codes?: string[];
   accepted: boolean;
   rejections: string[];
   idea: TradeIdea | null;

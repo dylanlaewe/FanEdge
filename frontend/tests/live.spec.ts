@@ -104,8 +104,15 @@ test("real connected league: all pages at desktop, tablet, mobile", async ({
         ),
       ).toBeTruthy();
       if (view === "team") {
+        const drawerStart = performance.now();
         await page.locator(".roster-section .player-row").first().click();
         await expect(page.getByRole("dialog")).toBeVisible();
+        measurements.push({
+          width,
+          view: "drawer",
+          ms: Math.round(performance.now() - drawerStart),
+          requests: requests - before,
+        });
         await page.screenshot({ path: `${output}/${width}-drawer.png` });
         await page
           .getByRole("button", { name: "Close player details" })

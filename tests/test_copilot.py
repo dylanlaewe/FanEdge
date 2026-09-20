@@ -1,8 +1,14 @@
 from datetime import datetime
 
 from copilot import (
-    CopilotEntityResolver, CopilotState, IntentType, answer_query,
-    build_grounded_answer, classify_query, contextual_suggestions, retrieve_context,
+    CopilotEntityResolver,
+    CopilotState,
+    IntentType,
+    answer_query,
+    build_grounded_answer,
+    classify_query,
+    contextual_suggestions,
+    retrieve_context,
     CopilotTools,
 )
 from football_data import PlayerWeeklyContext
@@ -147,7 +153,8 @@ def test_waiver_answer_confirms_league_availability_and_roster_fit():
     intent = classify_query("Who is the best RB available?", resolver(value))
     answer = build_grounded_answer(intent, CopilotTools(value))
     assert "Casey Available" in answer.answer
-    assert answer.action == "CONSIDER ADD"
+    # M14: positional need without supported role evidence is a watch, not an add.
+    assert answer.action == "MONITOR"
     assert any(item.source == "Sleeper league ownership" for item in answer.evidence)
 
 

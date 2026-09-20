@@ -228,6 +228,55 @@ async function tradeFixtures(page: Page) {
     }),
   );
 }
+test("market keyboard navigation and drawer Escape restore focus", async ({
+  page,
+}) => {
+  await tradeFixtures(page);
+  await connect(page);
+  await page.getByRole("link", { name: "Market", exact: true }).click();
+  const waivers = page.getByRole("tab", { name: /Waivers/ });
+  await waivers.focus();
+  await waivers.press("ArrowRight");
+  await expect(
+    page.getByRole("tab", { name: "Trades", exact: true }),
+  ).toBeFocused();
+  await page.getByRole("tab", { name: "Trades", exact: true }).press("End");
+  await expect(page.getByRole("tab", { name: /Watchlist/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await page.getByRole("link", { name: "Team", exact: true }).click();
+  const row = page.locator(".roster-section .player-row").first();
+  await row.click();
+  await page.getByRole("dialog").press("Escape");
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+  await expect(row).toBeFocused();
+});
+
+test("late trade responses cannot restore results after protections change", async ({
+  page,
+}) => {
+  await tradeFixtures(page);
+  let release!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/trades/search?**", async (route) => {
+    await waiting;
+    await route.fulfill({ json: tradeSearch });
+  });
+  await connect(page);
+  await page.getByRole("link", { name: "Market", exact: true }).click();
+  await page.getByRole("tab", { name: "Trades", exact: true }).click();
+  await page.getByRole("button", { name: "Find trades", exact: true }).click();
+  await page.locator(".trade-protections summary").click();
+  await page.getByLabel(/Protect high-importance starters/).uncheck();
+  release();
+  await expect(
+    page.getByRole("button", { name: "Find trades", exact: true }),
+  ).toBeEnabled();
+  await expect(page.locator(".trade-results .trade-idea")).toHaveCount(0);
+});
 test("trade discovery, player protection, manual analysis and targeted drawer", async ({
   page,
 }) => {

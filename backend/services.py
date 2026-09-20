@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass, replace, field
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from backend.cache import TTLCache
+from backend.data_health import DataHealth, ProviderCache
 from copilot import CopilotEntityResolver, CopilotState, answer_query, classify_query
 from football_data import (
     FootballDataError,
@@ -106,7 +108,8 @@ class IntelligenceService:
         self.sleeper = sleeper or SleeperClient(timeout=20)
         self.nflverse = nflverse or NflverseClient()
         self.news = news or ESPNNewsClient()
-        self.providers = TTLCache(64)
+        self.health = DataHealth()
+        self.providers = ProviderCache(self.health)
         self.snapshots = TTLCache(32)
         self.conversations = TTLCache(256)
         self.trade_engines = TTLCache(8)
@@ -170,6 +173,15 @@ class IntelligenceService:
         start = perf_counter()
         timings, warnings = {}, []
 
+        def dataset(key, ttl, fetch, **kwargs):
+            try:
+                return self.providers.get(key, ttl, fetch, **kwargs)
+            except FootballDataError:
+                warnings.append(
+                    f"{key[0] if isinstance(key, tuple) else key} unavailable; other datasets remain usable."
+                )
+                return []
+
         @contextmanager
         def timed(name):
             begin = perf_counter()
@@ -216,7 +228,7 @@ class IntelligenceService:
         with timed("football_datasets_and_indexes"):
             if nfl_state:
                 try:
-                    rows = self.providers.get(
+                    rows = dataset(
                         "schedule_rows",
                         21600,
                         self.nflverse.get_schedule_rows,
@@ -226,29 +238,29 @@ class IntelligenceService:
 
                     def indexes():
                         season = nfl_state.season
-                        current = self.providers.get(
+                        current = dataset(
                             ("stats", season),
                             21600,
                             lambda: self.nflverse.get_stat_rows(season),
                             force=refresh,
                         )
-                        prior = self.providers.get(
+                        prior = dataset(
                             ("stats", season - 1),
                             86400,
                             lambda: self.nflverse.get_stat_rows(season - 1),
                         )
-                        current_snaps = self.providers.get(
+                        current_snaps = dataset(
                             ("snaps", season),
                             21600,
                             lambda: self.nflverse.get_snap_rows(season),
                             force=refresh,
                         )
-                        prior_snaps = self.providers.get(
+                        prior_snaps = dataset(
                             ("snaps", season - 1),
                             86400,
                             lambda: self.nflverse.get_snap_rows(season - 1),
                         )
-                        reports = self.providers.get(
+                        reports = dataset(
                             ("injuries", season),
                             3600,
                             lambda: self.nflverse.get_injury_rows(season),
@@ -286,8 +298,20 @@ class IntelligenceService:
                         old_snaps,
                         injuries,
                         depth,
-                    ) = self.providers.get(index_key, 21600, indexes, force=refresh)
-                    fresh = schedule.complete
+                    ) = self.providers.get(index_key, 300, indexes, force=refresh)
+                    datasets = self.health.report(
+                        expected_week=max(0, nfl_state.week - 1),
+                        season=nfl_state.season,
+                    )
+                    fresh = (
+                        schedule.complete
+                        and bool(performances)
+                        and not any(
+                            d["status"] in {"UNAVAILABLE", "STALE", "DELAYED"}
+                            for d in datasets
+                            if d["dataset"] in {"stats", "snaps", "injuries"}
+                        )
+                    )
                 except FootballDataError:
                     warnings.append(
                         "Some football datasets are unavailable. Missing evidence stays unknown."
@@ -399,6 +423,7 @@ class IntelligenceService:
                     "news_facts", 900, facts_factory, force=refresh
                 )
             except NewsError:
+                fresh = False
                 warnings.append(
                     "News refresh unavailable; last verified reports may be stale."
                 )
@@ -432,6 +457,15 @@ class IntelligenceService:
             memory = self.repository.reconcile(
                 scope, news_result.feed, data_fresh=fresh
             )
+            self.health.observe(
+                ("memory", scope.sleeper_user_id, league_id),
+                300,
+                memory.current,
+                failed=not fresh,
+                warning="Lifecycle resolution is paused while required evidence is incomplete."
+                if not fresh
+                else None,
+            )
             if fresh:
                 evaluate_pending_lineup_decisions(
                     self.repository, scope, scope.week, performances
@@ -464,7 +498,7 @@ class IntelligenceService:
                 {
                     str(pid): str(team.get("roster_id", index + 1))
                     for index, team in enumerate(rosters)
-                    for pid in team.get("players") or []
+                    for pid in build_rostered_player_ids([team])
                 },
                 str(
                     raw.get(
@@ -476,7 +510,12 @@ class IntelligenceService:
                         ),
                     )
                 ),
+                available_ids=frozenset(p.player_id for p in available),
             )
+            from quality import enforce_state
+
+            state = enforce_state(state)
+            warnings.extend(issue["detail"] for issue in state.quality_issues)
         self.build_count += 1
         timings["total"] = round((perf_counter() - start) * 1000, 3)
         # Sleeper roster metadata may carry a manager-provided team name; never invent a logo.
@@ -523,12 +562,65 @@ class IntelligenceService:
                 }
             except (SleeperAPIError, AttributeError):
                 pass  # Stable roster-ID labels are explicit fallbacks, never invented names.
+            market, market_status = (
+                {},
+                {
+                    "status": "DISABLED",
+                    "reason": "Optional ADP calibration is disabled; draft sentiment is not in-season market value.",
+                },
+            )
+            if os.getenv("FANEDGE_MARKET_ADP_ENABLED") == "1":
+                from calibration import ADPClient, CalibrationError, resolve_adp
+
+                positions = snapshot.state.league.get("roster_positions") or []
+                scoring = {0: "standard", 0.5: "half-ppr", 1: "ppr"}.get(
+                    (snapshot.state.league.get("scoring_settings") or {}).get("rec", 0)
+                )
+                custom_receiving = any(
+                    key.startswith("bonus_rec") or key in {"rec_te", "rec_rb", "rec_wr"}
+                    for key in snapshot.state.league.get("scoring_settings", {})
+                )
+                if (
+                    scoring
+                    and not custom_receiving
+                    and positions.count("QB") == 1
+                    and "SUPER_FLEX" not in positions
+                    and "OP" not in positions
+                ):
+                    key = (
+                        "calibration",
+                        snapshot.scope.season,
+                        scoring,
+                        len(snapshot.rosters),
+                    )
+                    try:
+                        payload = self.providers.get(
+                            key,
+                            86400,
+                            lambda: ADPClient().fetch(
+                                scoring, len(snapshot.rosters), snapshot.scope.season
+                            ),
+                        )
+                        market, market_status = resolve_adp(
+                            payload,
+                            snapshot.state.active_players,
+                            season=snapshot.scope.season,
+                            week=snapshot.scope.week,
+                            teams=len(snapshot.rosters),
+                            scoring=scoring,
+                        )
+                    except CalibrationError:
+                        market_status = {"status": "UNAVAILABLE"}
+                else:
+                    market_status = {"status": "UNSUPPORTED_FORMAT"}
             return TradeEngine(
                 snapshot.state,
                 snapshot.rosters,
                 snapshot.metadata,
                 snapshot.scope.sleeper_user_id,
                 names,
+                market=market,
+                market_status=market_status,
             )
 
         return self.trade_engines.get(snapshot.id, 300, build)
@@ -545,9 +637,44 @@ class IntelligenceService:
                 "goal": options.goal,
                 "count": len(result["ideas"]),
                 "tested": result["tested"],
+                "diagnostics": result.get("diagnostics", {}),
             },
         )
         return result
+
+    def data_health(self, snapshot=None):
+        rows = self.health.report(
+            expected_week=max(0, snapshot.scope.week - 1) if snapshot else None,
+            season=snapshot.scope.season if snapshot else None,
+        )
+        if snapshot:
+            keys = {
+                ("rosters", snapshot.scope.league_id),
+                ("memory", snapshot.scope.sleeper_user_id, snapshot.scope.league_id),
+            }
+            rows += self.health.report(keys)
+        if not any(row["dataset"] == "calibration" for row in rows):
+            rows.append(
+                {
+                    "provider": "Market calibration",
+                    "dataset": "calibration",
+                    "status": "NOT_FETCHED"
+                    if os.getenv("FANEDGE_MARKET_ADP_ENABLED") == "1"
+                    else "DISABLED",
+                    "last_success": None,
+                    "age_seconds": None,
+                    "records": 0,
+                    "stale_threshold_seconds": 86400,
+                    "warnings": [
+                        "No live market price is used. Optional, sample-gated ADP only."
+                    ],
+                }
+            )
+        return {
+            "providers": rows,
+            "quality_issues": list(snapshot.state.quality_issues) if snapshot else [],
+            "fetch_freshness_is_not_content_freshness": True,
+        }
 
     def record_feedback(self, scope, event_id, status):
         self.repository.record_feedback(scope, event_id, status)
@@ -585,7 +712,7 @@ class IntelligenceService:
         state, scope = snapshot.state, snapshot.scope
         conversation_id = conversation_id or str(uuid4())
         key = (scope.sleeper_user_id, scope.league_id, scope.season, conversation_id)
-        previous = self.conversations.get(key, 3600, lambda: (None, None))
+        previous = self.conversations.get(key, 3600, lambda: (None, None, None))
         resolver = CopilotEntityResolver(
             state.roster,
             (candidate.player for candidate in state.waiver_candidates),
@@ -593,7 +720,72 @@ class IntelligenceService:
             state.active_players,
         )
         intent = classify_query(question, resolver, previous_intent=previous[0])
-        if intent.primary_intent.startswith("TRADE_"):
+        if intent.follow_up and previous[1] and previous[1].plan:
+            return self.ask(
+                snapshot, previous[2], conversation_id, suggested, trade_preferences
+            )
+        if intent.primary_intent in {"ACTION_PLAN", "WEEKLY_PLAN"}:
+            from action_planner import plan_actions
+            from backend.trade_copilot import answer_trade
+            from trades import TradeOptions
+
+            preferences = trade_preferences or {}
+            goal_question = re.split(
+                r"\b(?:without giving up|without trading|do not trade|don't trade|protect|keep)\b",
+                question,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+            planning_intent = classify_query(goal_question, resolver)
+            locks = self.trade_engine(snapshot).protections(
+                TradeOptions(
+                    protected=tuple(preferences.get("protected", ())),
+                    trade_block=tuple(preferences.get("trade_block", ())),
+                    protect_core=preferences.get("protect_core", True),
+                )
+            )
+            trade_intent = replace(
+                planning_intent,
+                position=planning_intent.position
+                or (
+                    planning_intent.player_entities[0].position
+                    if planning_intent.player_entities and "replace" in question.lower()
+                    else None
+                ),
+                primary_intent="TRADE_TARGET"
+                if any(
+                    p.source_tier == "LEAGUE_ROSTERED"
+                    for p in planning_intent.player_entities
+                )
+                else "TRADE_FIND",
+            )
+            trade_answer = answer_trade(
+                self, snapshot, question, trade_intent, preferences
+            )
+            if trade_answer.trades:
+                locks = set(locks) | set(trade_answer.trades.get("protected", ()))
+            live_fresh = (
+                snapshot.data_fresh
+                and (
+                    datetime.now(timezone.utc)
+                    - datetime.fromisoformat(snapshot.built_at)
+                ).total_seconds()
+                < 300
+                and not any(
+                    row["status"] in {"UNAVAILABLE", "STALE", "DELAYED"}
+                    for row in self.data_health(snapshot)["providers"]
+                    if row["dataset"] != "calibration"
+                )
+            )
+            answer = plan_actions(
+                state,
+                question,
+                planning_intent,
+                trade_answer=trade_answer,
+                protected=locks,
+                fresh=live_fresh,
+            )
+        elif intent.primary_intent.startswith("TRADE_"):
             from backend.trade_copilot import answer_trade
 
             answer = answer_trade(self, snapshot, question, intent, trade_preferences)
@@ -634,7 +826,7 @@ class IntelligenceService:
             answer, _ = answer_query(
                 question, intent, state, previous_answer=previous[1]
             )
-        self.conversations.put(key, (intent, answer), 3600)
+        self.conversations.put(key, (intent, answer, question), 3600)
         self.repository.record_analytics(
             scope,
             "copilot_question_submitted",

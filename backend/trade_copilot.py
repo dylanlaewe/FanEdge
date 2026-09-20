@@ -5,7 +5,7 @@ from dataclasses import replace
 
 from backend import presenter
 from copilot import CopilotAnswer, CopilotEntityResolver, EvidenceReference
-from trades import TradeOptions
+from trades import MODEL_VERSION, TradeOptions
 
 
 def answer_trade(service, snapshot, question, intent, preferences=None):
@@ -35,6 +35,7 @@ def answer_trade(service, snapshot, question, intent, preferences=None):
             return CopilotAnswer(
                 "Which player should I protect? Use their full roster name.",
                 confidence="LOW",
+                unsupported=True,
             )
         protected.extend(p.player_id for p in resolved)
     opponents = [
@@ -137,7 +138,7 @@ def answer_trade(service, snapshot, question, intent, preferences=None):
             "elapsed_ms": 0,
             "warnings": result["rejections"] or engine.warnings,
             "protected": sorted(engine.protections(options)),
-            "model_version": "trade-evidence-v1",
+            "model_version": MODEL_VERSION,
         }
         summary = (
             "This package is worth discussing based on both rosters."

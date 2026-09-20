@@ -14,6 +14,7 @@ def main():
     parser.add_argument("--username", default="TKelceLoveMachine")
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--trades", action="store_true")
+    parser.add_argument("--copilot", action="store_true")
     args = parser.parse_args()
 
     def fetch(path, body=None):
@@ -70,6 +71,15 @@ def main():
             "candidates_checked": search["tested"],
             "cached_search_median_ms": round(statistics.median(samples), 3),
             "cached_search_p95_ms": samples[max(0, int(len(samples) * 0.95) - 1)],
+        }
+    if args.copilot:
+        values = [
+            fetch(path("copilot"), {"question": "I need an RB."})[1]
+            for _ in range(min(args.samples, 5))
+        ]
+        results["copilot"] = {
+            "first_ms": values[0],
+            "warm_median_ms": round(statistics.median(values[1:] or values), 3),
         }
     print(json.dumps(results, indent=2))
 

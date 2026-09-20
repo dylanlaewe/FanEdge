@@ -117,6 +117,21 @@ export type Snapshot = {
   suggestions: string[];
 };
 export type Answer = {
+  plan?: {
+    goal: string;
+    considered: string[];
+    limitations: string[];
+    actions: {
+      kind: string;
+      summary: string;
+      cost: string;
+      improvement: string;
+      reversibility: string;
+      confidence: string;
+      player_ids: string[];
+      evidence: string[];
+    }[];
+  } | null;
   trades?: import("./trades").TradeSearch | null;
   conversation_id: string;
   model_text?: string | null;

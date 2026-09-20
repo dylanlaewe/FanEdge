@@ -51,6 +51,15 @@ def search(body: api.TradeRequest, ctx: TradeContext):
     return {**value, "players": players_for(service.trade_engine(snapshot), snapshot)}
 
 
+@router.post("/diagnostics")
+def diagnostics(body: api.TradeRequest, ctx: TradeContext):
+    service, snapshot = ctx
+    try:
+        return service.find_trades(snapshot, body.options())["diagnostics"]
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
 @router.post("/analyze", response_model=api.TradeAnalysis)
 def analyze(body: api.TradeAnalyzeRequest, ctx: TradeContext):
     service, snapshot = ctx

@@ -16,11 +16,12 @@ from time import perf_counter
 from lineup_optimizer import comparison_score, normalize_lineup_slots
 from sleeper_api import build_roster
 from waiver_engine import build_rostered_player_ids
+from calibration import TIERS, evidence_tier
 
 POSITIONS = ("QB", "RB", "WR", "TE")
 GOALS = (*POSITIONS, "BEST_UPGRADE", "DEPTH")
 UNAVAILABLE = {"out", "ir", "pup", "doubtful", "suspended"}
-MODEL_VERSION = "trade-evidence-v1"
+MODEL_VERSION = "trade-evidence-v2"
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,37 @@ class PlayerValue:
     supported: bool
     available: bool
     reasons: tuple[str, ...]
+    tier: str = "SPECULATIVE"
+    market_evidence: dict | None = None
+
+
+def rejection_codes(reasons):
+    mappings = (
+        ("protected", "PROTECTED_PLAYER"),
+        ("Duplicate", "DUPLICATE_PLAYER"),
+        ("belong", "INVALID_OWNERSHIP"),
+        ("unavailable", "UNSUPPORTED_ASSET"),
+        ("Only 1", "PACKAGE_SHAPE"),
+        ("capacity", "INVALID_ROSTER"),
+        ("starting requirements", "UNSUPPORTED_FORMAT"),
+        ("Relative evidence", "VALUE_GAP"),
+        ("two starters", "QUANTITY_FOR_QUALITY"),
+        ("stronger evidence", "INSUFFICIENT_EVIDENCE"),
+        ("deteriorates", "STARTER_DOWNGRADE"),
+        ("Their roster receives no", "NO_PARTNER_INCENTIVE"),
+        ("Your roster receives no", "REDUNDANT_INCOMING_POSITION"),
+        ("does not", "POSITIONAL_NON_FIT"),
+        ("requested player", "TARGET_MISMATCH"),
+        ("different partner", "PARTNER_MISMATCH"),
+        ("tier gap", "STAR_FOR_DEPTH"),
+        ("uncovered", "DEPTH_DAMAGE"),
+    )
+    return list(
+        dict.fromkeys(
+            next((code for fragment, code in mappings if fragment in reason), "OTHER")
+            for reason in reasons
+        )
+    )
 
 
 def assign_lineup(slots, players, scores):
@@ -105,8 +137,20 @@ def assign_lineup(slots, players, scores):
 
 
 class TradeEngine:
-    def __init__(self, state, raw_rosters, metadata, user_id, names=None):
+    def __init__(
+        self,
+        state,
+        raw_rosters,
+        metadata,
+        user_id,
+        names=None,
+        *,
+        market=None,
+        market_status=None,
+    ):
         self.state, self.players = state, {p.player_id: p for p in state.active_players}
+        self.market_status = market_status or {"status": "NOT_CONFIGURED"}
+        market = market or {}
         self.slots = normalize_lineup_slots(state.league.get("roster_positions") or [])
         self.capacity = sum(
             str(s).upper() not in {"IR", "TAXI"}
@@ -267,6 +311,18 @@ class TradeEngine:
                 supported,
                 available,
                 reasons,
+                evidence_tier(
+                    quality[pid],
+                    typical,
+                    games=games,
+                    historical_games=role.historical.games
+                    if role and role.historical
+                    else 0,
+                    confidence=confidence,
+                    market=market.get(pid),
+                    league_size=len(self.teams),
+                ),
+                asdict(market[pid]) if pid in market else None,
             )
         self._profiles = {}
         self.profiles = {
@@ -515,7 +571,12 @@ class TradeEngine:
         if not self.enabled:
             reject.append("League starting requirements cannot be fully simulated.")
         if reject:
-            return {"accepted": False, "rejections": reject, "idea": None}
+            return {
+                "accepted": False,
+                "rejections": reject,
+                "codes": rejection_codes(reject),
+                "idea": None,
+            }
         before_us, before_them = (
             self.profiles[self.user_team_id],
             self.profiles[partner],
@@ -536,6 +597,7 @@ class TradeEngine:
                     "The trade cannot produce two valid, capacity-compliant starting lineups."
                 ],
                 "idea": None,
+                "codes": ["INVALID_ROSTER"],
             }
         sent = sum(self.values[p].relative_value for p in outgoing)
         received = sum(self.values[p].relative_value for p in incoming)
@@ -543,6 +605,13 @@ class TradeEngine:
             reject.append(
                 "Relative evidence value is too uneven for a plausible package."
             )
+        for assets, return_assets in ((outgoing, incoming), (incoming, outgoing)):
+            best_sent = max(TIERS.index(self.values[p].tier) for p in assets)
+            best_received = max(TIERS.index(self.values[p].tier) for p in return_assets)
+            if best_sent >= TIERS.index("HIGH_END") and best_sent - best_received >= 2:
+                reject.append(
+                    "A major evidence tier gap is not compensated by comparable starting quality."
+                )
 
         def impact(before, after, drops):
             delta = after["lineup_quality"] - before["lineup_quality"]
@@ -577,6 +646,15 @@ class TradeEngine:
             impact(before_us, after_us, drops_us),
             impact(before_them, after_them, drops_them),
         )
+        for impact_value in (us, them):
+            if any(
+                impact_value["after"][pos]["status"] == "STRONG_NEED"
+                and impact_value["before"][pos]["status"] != "STRONG_NEED"
+                for pos in POSITIONS
+            ):
+                reject.append(
+                    "The trade leaves a previously covered starting position uncovered."
+                )
         for label, value in (("Your", us), ("Their", them)):
             if value["lineup_delta"] < -1:
                 reject.append(
@@ -665,6 +743,13 @@ class TradeEngine:
                 risks.append(
                     f"Reported context — {fact.subject_name}: {fact.evidence_text} ({', '.join(fact.sources)}). Recheck in the player drawer."
                 )
+        # M13's start-now and trade-away advice can be alternatives, not both actions.
+        if set(outgoing) & {
+            d.challenger.player_id for d in getattr(self.state, "lineup_decisions", ())
+        }:
+            risks.append(
+                "Starting this player now and exploring a trade are alternatives, not cumulative actions; re-run the lineup after a trade."
+            )
         relative = (
             "USER_FAVORED"
             if received > sent * 1.15
@@ -715,7 +800,12 @@ class TradeEngine:
                 3,
             ),
         }
-        return {"accepted": not reject, "rejections": reject, "idea": idea}
+        return {
+            "accepted": not reject,
+            "rejections": reject,
+            "codes": rejection_codes(reject),
+            "idea": idea,
+        }
 
     def _reasons(self, impact):
         reasons = []
@@ -731,6 +821,14 @@ class TradeEngine:
 
     def search(self, options=DEFAULT_OPTIONS):
         start, tested, ideas, seen = perf_counter(), 0, [], set()
+        considered, rejected, primary, all_reasons = 0, 0, Counter(), Counter()
+
+        def reject_codes(codes):
+            nonlocal rejected
+            rejected += 1
+            primary[codes[0] if codes else "OTHER"] += 1
+            all_reasons.update(set(codes or ["OTHER"]))
+
         if options.goal not in GOALS or not self.user_team_id:
             raise ValueError("Unsupported trade goal or missing user roster.")
         if any(
@@ -790,6 +888,7 @@ class TradeEngine:
             packages += [(a, (b,)) for a in combinations(mine[:7], 2) for b in theirs]
             packages += [((a,), b) for a in mine for b in combinations(theirs[:7], 2)]
             for outgoing, incoming in packages:
+                considered += 1
                 if (
                     options.target_id
                     and options.target_id not in incoming
@@ -798,15 +897,25 @@ class TradeEngine:
                         self.players[p].position == options.goal for p in incoming
                     )
                 ):
+                    reject_codes(
+                        [
+                            "TARGET_MISMATCH"
+                            if options.target_id and options.target_id not in incoming
+                            else "POSITIONAL_NON_FIT"
+                        ]
+                    )
                     continue
                 a, b = (
                     sum(self.values[p].relative_value for p in outgoing),
                     sum(self.values[p].relative_value for p in incoming),
                 )
                 if not max(a, b) or min(a, b) / max(a, b) < 0.72:
+                    reject_codes(["VALUE_GAP"])
                     continue
                 tested += 1
                 result = self.analyze(outgoing, incoming, options)
+                if not result["accepted"]:
+                    reject_codes(result["codes"])
                 if (
                     result["accepted"]
                     and result["idea"]["id"] not in seen
@@ -832,6 +941,18 @@ class TradeEngine:
             "warnings": self.warnings,
             "protected": sorted(protected),
             "model_version": MODEL_VERSION,
+            "diagnostics": {
+                "considered": considered,
+                "rejected": rejected,
+                "surviving": considered - rejected,
+                "surfaced": len(diversified),
+                "primary_reasons": dict(primary),
+                "all_reasons": dict(all_reasons),
+                "analyzer_entries": tested,
+                "protected_assets": len(protected),
+                "model_version": MODEL_VERSION,
+                "calibration": self.market_status,
+            },
         }
 
     def overview(self):

@@ -257,8 +257,8 @@ def test_search_target_trade_block_determinism_and_variation():
     "question,intent",
     [
         ("Find me an RB trade", "TRADE_FIND"),
-        ("Find me a running back", "TRADE_FIND"),
-        ("Get me Player br2", "TRADE_TARGET"),
+        ("Find me a running back", "ACTION_PLAN"),
+        ("Get me Player br2", "ACTION_PLAN"),
         ("Who should I shop?", "TRADE_AWAY"),
         ("Trade Player aw2 for Player br2", "TRADE_ANALYZE"),
         ("Which team is the best trade partner?", "TRADE_PARTNER"),

@@ -197,6 +197,45 @@ def test_partial_provider_failure_degrades_without_inventing_data(service):
     assert not snapshot.state.contexts["one"].is_bye
 
 
+def test_health_endpoint_no_secret_or_user_identity_and_scoped_memory(client):
+    initial = client.get("/api/health/data").json()
+    assert any(row["status"] == "NOT_FETCHED" for row in initial["providers"])
+    scoped = client.get("/api/leagues/league/health/data?username=manager").json()
+    assert any(row["dataset"] == "memory" for row in scoped["providers"])
+    assert "manager" not in str(scoped) and "api_key" not in str(scoped)
+
+
+def test_single_injury_provider_failure_preserves_other_datasets(service):
+    service.nflverse.get_stat_rows = lambda season: [
+        {
+            "season": season,
+            "week": "1",
+            "season_type": "REG",
+            "player_id": "g1",
+            "player_display_name": "Player One",
+            "position": "WR",
+            "team": "LAR",
+            "receiving_yards": "100",
+        }
+    ]
+
+    def broken(season):
+        raise FootballDataError("provider unavailable")
+
+    service.nflverse.get_injury_rows = broken
+    snapshot, _ = service.get_snapshot("manager", "league")
+    rows = service.data_health(snapshot)["providers"]
+    assert any(
+        r["dataset"] == "stats" and r["records"] == 1 and r["status"] == "OK"
+        for r in rows
+    )
+    assert any(
+        r["dataset"] == "injuries" and r["status"] == "UNAVAILABLE" for r in rows
+    )
+    assert snapshot.state.contexts["one"].season_stats is not None
+    assert not snapshot.data_fresh
+
+
 def test_cache_expiry_single_flight_and_bounded_storage():
     now, calls = [0], [0]
     cache = TTLCache(max_entries=2, clock=lambda: now[0])
@@ -389,7 +428,7 @@ def test_trade_endpoints_and_cache_preserve_base_snapshot(
     "question,intent",
     [
         ("Find me an RB trade", "TRADE_FIND"),
-        ("Get me Player br2", "TRADE_TARGET"),
+        ("Get me Player br2", "ACTION_PLAN"),
         ("Shop Player aw2", "TRADE_AWAY"),
         ("Trade Player aw2 for Player br2", "TRADE_ANALYZE"),
         ("Who should I trade with?", "TRADE_PARTNER"),
@@ -401,7 +440,12 @@ def test_trade_copilot_uses_engine_not_model(client, trade_context, question, in
     )
     assert result.status_code == 200
     assert result.json()["intent"] == intent
-    if intent != "TRADE_PARTNER":
+    if intent == "ACTION_PLAN":
+        assert (
+            result.json()["action"] == "HOLD"
+        )  # Fixture football providers are empty.
+        assert result.json()["plan"]["goal"] == "TARGET_PLAYER"
+    elif intent != "TRADE_PARTNER":
         assert result.json()["trades"]["ideas"]
     assert result.json()["model_text"] is None
 

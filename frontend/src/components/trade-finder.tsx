@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeftRight, LockKeyhole, Search, Sparkles } from "lucide-react";
 import { request, title } from "@/lib/api";
@@ -221,10 +221,16 @@ export function TradeFinder() {
   const [incoming, setIncoming] = useState<string[]>([]);
   const [manualPartner, setManualPartner] = useState("");
   const [showTeams, setShowTeams] = useState(false);
+  const generation = useRef(0);
   useEffect(() => {
+    generation.current += 1;
     setResult(null);
     setAnalysis(null);
-  }, [snapshot?.meta.id]);
+    setPending(false);
+    return () => {
+      generation.current += 1;
+    };
+  }, [snapshot?.meta.id, tradePreferences, tradeTarget]);
   const track = (event: string) =>
     request(endpoint("analytics"), { event }).catch(() => {});
   useEffect(() => {
@@ -268,42 +274,49 @@ export function TradeFinder() {
     partner_id: partner || null,
   });
   async function find(variation = false, chosenPartner = partner) {
+    const requestGeneration = ++generation.current;
     setPending(true);
     setError("");
     setAnalysis(null);
     if (variation) void track("TRADE_VARIATION_REQUESTED");
     try {
-      setResult(
-        await request<TradeSearch>(endpoint("trades/search"), {
-          ...options(),
-          partner_id: chosenPartner || null,
-          exclude_ids: variation ? result?.ideas.map((i) => i.id) || [] : [],
-        }),
-      );
+      const found = await request<TradeSearch>(endpoint("trades/search"), {
+        ...options(),
+        partner_id: chosenPartner || null,
+        exclude_ids: variation ? result?.ideas.map((i) => i.id) || [] : [],
+      });
+      if (requestGeneration !== generation.current) return;
+      setResult(found);
       setResultGoal(goal);
     } catch (e) {
-      setError((e as Error).message);
+      if (requestGeneration === generation.current)
+        setError((e as Error).message);
     } finally {
-      setPending(false);
+      if (requestGeneration === generation.current) setPending(false);
     }
   }
   async function analyze(send: string[], receive: string[]) {
+    const requestGeneration = ++generation.current;
     setPending(true);
     setError("");
     try {
-      setAnalysis(
-        await request<TradeAnalysis>(endpoint("trades/analyze"), {
+      const evaluated = await request<TradeAnalysis>(
+        endpoint("trades/analyze"),
+        {
           ...options(),
           partner_id: null,
           target_id: null,
           outgoing: send,
           incoming: receive,
-        }),
+        },
       );
+      if (requestGeneration !== generation.current) return;
+      setAnalysis(evaluated);
     } catch (e) {
-      setError((e as Error).message);
+      if (requestGeneration === generation.current)
+        setError((e as Error).message);
     } finally {
-      setPending(false);
+      if (requestGeneration === generation.current) setPending(false);
     }
   }
   return (
@@ -674,8 +687,10 @@ export function TradeFinder() {
               ))
           ) : (
             <EmptyState title="No trade clears the bar">
-              Try another goal or partner. Protections, evidence, and both
-              rosters matter more than filling a list.
+              FanEdge didn’t find a trade it can support with enough evidence
+              right now. Explore the complementary partners above, target a
+              specific player, or review Waivers and Watchlist. Changing a
+              protection is optional—not a reason to weaken your roster.
             </EmptyState>
           )
         ) : (

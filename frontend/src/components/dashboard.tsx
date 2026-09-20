@@ -660,8 +660,31 @@ function Market({ data }: { data: Snapshot }) {
           <button
             role="tab"
             aria-selected={tab === value}
+            tabIndex={tab === value ? 0 : -1}
             key={value}
             onClick={() => setTab(value)}
+            onKeyDown={(event) => {
+              const tabs = ["WAIVERS", "TRADES", "WATCHLIST"] as const;
+              const index = tabs.indexOf(value);
+              const next =
+                event.key === "ArrowRight"
+                  ? (index + 1) % 3
+                  : event.key === "ArrowLeft"
+                    ? (index + 2) % 3
+                    : event.key === "Home"
+                      ? 0
+                      : event.key === "End"
+                        ? 2
+                        : null;
+              if (next === null) return;
+              event.preventDefault();
+              setTab(tabs[next]);
+              (
+                event.currentTarget.parentElement?.children[
+                  next
+                ] as HTMLButtonElement
+              )?.focus();
+            }}
           >
             {title(value)}
             {value !== "TRADES" && (
@@ -729,8 +752,16 @@ function Market({ data }: { data: Snapshot }) {
                 </article>
               ))
             ) : (
-              <EmptyState title="No players match this view">
-                Try another position or check the other market tab.
+              <EmptyState
+                title={
+                  tab === "WAIVERS" && !search && position === "All"
+                    ? "No immediate add clears the bar"
+                    : "No players match this view"
+                }
+              >
+                {tab === "WAIVERS" && !search && position === "All"
+                  ? "No available player has enough role evidence and roster fit for an immediate add. Review Watchlist for developing opportunities."
+                  : "Try another position or check the other market tab."}
               </EmptyState>
             )}
           </div>
