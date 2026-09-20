@@ -26,6 +26,9 @@ FanEdge is an AI-powered fantasy football strategist for real Sleeper leagues. I
 ```mermaid
 flowchart LR
     U[Streamlit UI] --> S[SleeperClient]
+    U --> C[Copilot router + tools]
+    C --> M[League intelligence state]
+    C -. optional phrasing .-> O[OpenAI Responses API]
     S --> A[Sleeper public API]
     U --> E[Strategy engine]
     E --> O[OpenAI Responses API]
@@ -53,10 +56,11 @@ flowchart LR
 - `outcomes.py` evaluates completed lineup comparisons from league-scored game results when both players' data is available.
 - `news.py` fetches one bounded NFL RSS batch, normalizes stories, resolves exact player/team identities, extracts source-bounded facts, and reconciles duplicates, contradictions, and freshness.
 - `news_intelligence.py` connects normalized facts to ownership, available teammates, role evidence, and roster need through an inspectable impact graph before extending the existing opportunity feed.
+- `copilot.py` owns Ask FanEdge intent routing, contextual player resolution, narrow capability retrieval, deterministic grounded answers, inspectable evidence, conversational follow-ups, and optional constrained response phrasing.
 
 ## Product experience
 
-The connected experience is organized as a responsive fantasy application around four weekly jobs: **Overview**, **My Team**, **Waivers**, and **Ask FanEdge**. Desktop uses persistent left navigation; mobile converts it to a compact bottom bar. Overview is now **Your Edge**, a proactive feed of the highest-priority changes that matter to the selected manager. My Team renders the league's real starting slots and bench as information-dense player rows, with position-specific production and workload signals. Waivers keeps its deterministic ranking and elevates players with corroborated opportunity events. Ask FanEdge receives the already-detected opportunity feed and may explain it, but cannot create new opportunities.
+The connected experience is organized as a responsive fantasy application around four weekly jobs: **Overview**, **My Team**, **Waivers**, and **Ask FanEdge**. Desktop uses persistent left navigation; mobile converts it to a compact bottom bar. Overview is now **Your Edge**, a proactive feed of the highest-priority changes that matter to the selected manager. My Team renders the league's real starting slots and bench as information-dense player rows, with position-specific production and workload signals. Waivers keeps its deterministic ranking and elevates players with corroborated opportunity events. Ask FanEdge is a session-based league copilot that routes questions to the same deterministic intelligence and exposes its evidence; it cannot create opportunities or invent unavailable facts.
 
 Presentation is split into `styles.py` and reusable sports components in `components.py`; `app.py` remains responsible for data orchestration and page composition. The redesign does not change the lineup optimizer, waiver ranking, schedule inference, identity matching, or role model.
 
@@ -138,6 +142,14 @@ Equivalent reports collapse into one fact while preserving their source referenc
 
 The feed is fetched as one batch and cached by Streamlit for 15 minutes. Normalized facts—not article bodies—are persisted in SQLite per user/league/season. If the provider fails, FanEdge reuses the last verified fact set, marks reporting freshness uncertain, and continues running all structured football intelligence. A provider failure is never interpreted as “no news.” Ask FanEdge receives only the relevant normalized news facts already supplied in context and is explicitly prohibited from using model-memory news.
 
+## Ask FanEdge V2
+
+M11 turns Ask FanEdge into a league-aware, multi-turn copilot rather than a generic chat wrapper. A deterministic router recognizes weekly planning, recent changes, lineup and start/sit decisions, waivers, drops, roster strengths and weaknesses, player analysis, injuries, news, matchups, and evidence requests. Player mentions resolve in league-relevance order: the user's roster, surfaced waiver candidates, other league-rostered players, then the active NFL universe. Ambiguity produces a clarification instead of a guessed identity.
+
+Each intent calls only the internal capabilities it needs—for example, waiver questions retrieve confirmed available candidates, roster needs, and conservative drop options, while a player question retrieves that player's weekly context, role, opportunity, matchup, news, and surfaced events. The deterministic answer is always available. When an OpenAI key is configured, the Responses API may improve phrasing under a strict supplied-context contract, but it cannot change the deterministic action, confidence, uncertainty, or hypothetical label. Provider failure falls back to the same grounded answer without disabling chat.
+
+The conversation lives only in Streamlit session state and resets when the selected league changes. Hypotheticals are visibly labeled and never mutate roster or decision memory. Analytics record only intent category, follow-up/hypothetical flags, support status, suggestion use, and evidence opens; raw question text and transcripts are not persisted. Current facts that are not supplied—such as weather—are explicitly unsupported rather than answered from model memory.
+
 ## Tech stack
 
 Python 3.11+, Streamlit, Requests, OpenAI Python SDK, python-dotenv, Sleeper's public API, and nflverse release data.
@@ -165,7 +177,7 @@ Then launch the app:
 streamlit run app.py
 ```
 
-The Sleeper roster experience still works without an OpenAI key; only strategy generation is disabled. Local intelligence memory defaults to `.fanedge/fanedge.db`; set `FANEDGE_DB_PATH` to use another development path.
+The entire deterministic Sleeper experience, including grounded Ask FanEdge answers, works without an OpenAI key. AI-assisted phrasing and legacy explanation buttons require a key. Local intelligence memory defaults to `.fanedge/fanedge.db`; set `FANEDGE_DB_PATH` to use another development path.
 
 ## Deploy to Streamlit Community Cloud
 

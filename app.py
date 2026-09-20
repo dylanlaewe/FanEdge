@@ -12,7 +12,11 @@ from typing import Any
 import streamlit as st
 from dotenv import load_dotenv
 
-from components import opportunity_card, page_header, player_row, prompt_tiles, section_title, swap_comparison, topbar, waiver_row
+from components import opportunity_card, page_header, player_row, section_title, swap_comparison, topbar, waiver_row
+from copilot import (
+    CopilotAnswer, CopilotEntityResolver, CopilotState, answer_query,
+    classify_query, contextual_suggestions,
+)
 from football_data import (
     FootballDataError, NFLState, NflverseClient, PlayerWeeklyContext, WeeklySchedule,
     build_performance_index, build_player_weekly_contexts, build_weekly_schedule, normalize_nfl_state,
@@ -21,7 +25,7 @@ from intelligence import build_availability_changes, build_historical_index, bui
 from lineup_optimizer import LineupDecision, build_current_lineup, optimize_lineup
 from matchup import DefenseVsPosition, build_defense_vs_position
 from memory import FeedbackStatus, LeagueScope, Lifecycle, ReconciliationResult, TemporalOpportunity
-from news import ESPNNewsClient, NewsError, NewsFact, NewsItem, NewsEntityResolver, extract_facts, freshness_bucket, reconcile_facts
+from news import ESPNNewsClient, NewsError, NewsItem, NewsEntityResolver, extract_facts, freshness_bucket, reconcile_facts
 from news_intelligence import NewsIntelligenceResult, integrate_news_intelligence
 from opportunity import PlayerOpportunity, build_opportunity_index, build_player_opportunities
 from opportunity_engine import FantasyOpportunity, build_opportunity_feed
@@ -29,7 +33,7 @@ from outcomes import evaluate_pending_lineup_decisions
 from player_identity import PlayerIdentity, PlayerIdentityResolver
 from sleeper_api import Roster, SleeperAPIError, SleeperClient, build_roster, find_user_roster
 from storage import SQLiteRepository
-from strategy_engine import generate_lineup_advice, generate_strategy, generate_waiver_advice
+from strategy_engine import generate_lineup_advice, generate_waiver_advice
 from styles import APP_CSS
 from waiver_engine import (
     WaiverCandidate, analyze_roster_needs, build_available_players, build_rostered_player_ids,
@@ -118,8 +122,15 @@ def scoring_label(league: dict[str, Any]) -> str:
 
 
 def reset_team() -> None:
-    for key in ("user", "leagues", "roster", "raw_roster", "selected_league_id", "strategy", "waiver_advice", "lineup_advice", "application_nav"):
+    for key in (
+        "user", "leagues", "roster", "raw_roster", "selected_league_id", "strategy",
+        "waiver_advice", "lineup_advice", "application_nav", "copilot_messages",
+        "copilot_league_id",
+    ):
         st.session_state.pop(key, None)
+    for key in tuple(st.session_state):
+        if str(key).startswith("copilot_evidence_"):
+            st.session_state.pop(key, None)
 
 
 def render_landing(nfl_state: NFLState | None) -> None:
@@ -354,36 +365,138 @@ def render_waivers(
             st.html('<section class="fe-ai-result">' f'<h3>{escape(item["title"])}</h3><p>{escape(item["body"])}</p></section>')
 
 
+def _render_copilot_answer(
+    answer: CopilotAnswer,
+    state: CopilotState,
+    *,
+    message_index: int,
+    repository: SQLiteRepository | None,
+    scope: LeagueScope | None,
+) -> None:
+    if answer.hypothetical:
+        st.badge("Hypothetical", icon=":material/science:", color="orange")
+    if answer.provider_fallback:
+        st.caption("Live phrasing was unavailable, so FanEdge kept the grounded deterministic answer.")
+    if answer.model_text:
+        st.markdown(answer.model_text)
+    else:
+        st.markdown(f"**{answer.answer}**")
+        if answer.why:
+            st.markdown("**Why**")
+            for reason in answer.why:
+                st.markdown(f"- {escape(reason)}")
+        if answer.action:
+            st.markdown(f"**What I would do:** {escape(answer.action.replace('_', ' ').title())}")
+        if answer.watch_for:
+            st.markdown(f"**Watch for:** {escape(answer.watch_for)}")
+    st.caption(f"{answer.confidence.title()} evidence confidence")
+
+    players = {player.player_id: player for player in state.active_players}
+    for player_id in answer.player_ids[:2]:
+        player = players.get(player_id)
+        if player:
+            st.html(player_row(
+                player, player.position, state.contexts.get(player_id),
+                state.opportunities.get(player_id), state.profiles.get(player_id),
+                state.identities.get(player_id),
+            ))
+
+    if answer.evidence:
+        evidence_key = f"copilot_evidence_{message_index}"
+        if st.button(
+            f"Evidence · {len(answer.evidence)}", icon=":material/fact_check:",
+            key=f"{evidence_key}_button",
+        ):
+            st.session_state[evidence_key] = not st.session_state.get(evidence_key, False)
+            if st.session_state[evidence_key] and repository and scope:
+                repository.record_analytics(
+                    scope, "copilot_evidence_opened",
+                    metadata={"references": len(answer.evidence)},
+                )
+        if st.session_state.get(evidence_key):
+            with st.container(border=True):
+                for reference in answer.evidence:
+                    st.markdown(f"**{escape(reference.label)}** — {escape(reference.detail)}")
+                    st.caption(reference.source)
+                    if reference.url:
+                        st.link_button("Open source", reference.url, icon=":material/open_in_new:")
+
+
 def render_ask_fanedge(
-    roster: Roster, league: dict[str, Any], nfl_state: NFLState | None,
-    contexts: dict[str, PlayerWeeklyContext], has_openai_key: bool,
-    feed: list[FantasyOpportunity],
+    state: CopilotState,
+    *,
     repository: SQLiteRepository | None = None,
     scope: LeagueScope | None = None,
-    news_facts: tuple[NewsFact, ...] = (),
 ) -> None:
     st.html(
-        '<section class="fe-ai-hero"><div><div class="fe-eyebrow">ASK FANEDGE</div><h1>Your league context, explained.</h1>'
-        '<p>FanEdge can turn lineup, waiver, role, availability, and relevant recent reporting into a concise weekly plan.</p></div>'
-        '<aside class="fe-capability"><strong>What this can do now</strong><br>Explain FanEdge decisions using your roster, verified evidence, and the cited recent reports supplied here. It cannot invent or search for missing news.</aside></section>'
+        '<section class="fe-ai-hero"><div><div class="fe-eyebrow">ASK FANEDGE</div><h1>Your league-aware fantasy copilot.</h1>'
+        '<p>Ask about this week, your lineup, waivers, roster construction, players, or what changed.</p></div>'
+        '<aside class="fe-capability"><strong>Grounded in your connected league</strong><br>Answers use your roster, league ownership, FanEdge decisions, verified role data, and cited reporting. Missing facts stay missing.</aside></section>'
     )
-    st.html(section_title("Suggested questions"))
-    st.html(prompt_tiles(("What changed with my team today?", "Did any injuries create an opportunity?", "What should I monitor before kickoff?")))
-    if st.button("Build my weekly strategy", type="primary", width="stretch", disabled=not has_openai_key, key="strategy_button"):
-        try:
-            with st.spinner("Building your weekly strategy…", show_time=True):
-                st.session_state.strategy = generate_strategy(roster, league, nfl_state=nfl_state, weekly_contexts=contexts, opportunity_feed=feed, news_facts=news_facts)
-                if repository and scope:
-                    repository.record_analytics(scope, "ask_fanedge_used")
-        except Exception:
-            st.error("We couldn’t build your strategy right now.", icon=":material/error:")
-    if not has_openai_key:
-        st.info("AI explanation is not configured in this environment. Your deterministic lineup and waiver intelligence remains available.", icon=":material/info:")
-    strategy = st.session_state.get("strategy")
-    if strategy:
-        st.html(section_title("Your weekly edge"))
-        for recommendation in strategy:
-            st.html('<section class="fe-ai-result">' f'<h3>{escape(recommendation["title"].replace("/", " / "))}</h3><p>{escape(recommendation["body"])}</p></section>')
+    league_id = str(state.league.get("league_id") or "")
+    if st.session_state.get("copilot_league_id") != league_id:
+        st.session_state.copilot_league_id = league_id
+        st.session_state.copilot_messages = []
+        for key in tuple(st.session_state):
+            if str(key).startswith("copilot_evidence_"):
+                st.session_state.pop(key, None)
+    messages: list[dict[str, Any]] = st.session_state.setdefault("copilot_messages", [])
+    if repository and scope:
+        repository.record_analytics(
+            scope, "ask_fanedge_opened",
+            idempotency_key=f"ask-opened:{scope.league_id}:{scope.season}:{scope.week}",
+        )
+
+    if not os.getenv("OPENAI_API_KEY"):
+        st.caption("Grounded mode is active. FanEdge can answer from connected evidence even without an AI provider.")
+
+    prompt: str | None = None
+    if not messages:
+        st.html(section_title("Try asking"))
+        prompt = st.pills(
+            "Suggested questions", contextual_suggestions(state), selection_mode="single",
+            key="copilot_suggestion_0", label_visibility="collapsed",
+        )
+        if prompt and repository and scope:
+            repository.record_analytics(scope, "copilot_suggested_prompt_clicked")
+
+    for index, message in enumerate(messages):
+        with st.chat_message(message["role"], avatar=":material/sports_football:" if message["role"] == "assistant" else None):
+            if message["role"] == "user":
+                st.markdown(message["content"])
+            else:
+                _render_copilot_answer(
+                    message["answer"], state, message_index=index,
+                    repository=repository, scope=scope,
+                )
+
+    typed_prompt = st.chat_input("Ask about your team…", max_chars=500)
+    prompt = typed_prompt or prompt
+    if not prompt:
+        return
+
+    previous_intent = next((message["intent"] for message in reversed(messages) if message["role"] == "assistant"), None)
+    previous_answer = next((message["answer"] for message in reversed(messages) if message["role"] == "assistant"), None)
+    surfaced = tuple(candidate.player for candidate in state.waiver_candidates)
+    resolver = CopilotEntityResolver(state.roster, surfaced, state.league_players, state.active_players)
+    intent = classify_query(prompt, resolver, previous_intent=previous_intent)
+    messages.append({"role": "user", "content": prompt})
+    with st.spinner("Checking your league evidence…"):
+        answer, _ = answer_query(prompt, intent, state, previous_answer=previous_answer)
+    messages.append({"role": "assistant", "answer": answer, "intent": intent})
+    if repository and scope:
+        repository.record_analytics(
+            scope, "copilot_question_submitted",
+            metadata={
+                "intent": intent.primary_intent,
+                "follow_up": intent.follow_up,
+                "hypothetical": intent.hypothetical,
+                "supported": not answer.unsupported,
+            },
+        )
+        if intent.follow_up:
+            repository.record_analytics(scope, "copilot_followup_used")
+    st.rerun()
 
 
 def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> None:
@@ -471,9 +584,9 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
     scope = LeagueScope(str(user["user_id"]), selected_id, scope_season, scope_week)
     news_uncertain = False
     news_fetch_succeeded = False
+    all_active_players = build_available_players(metadata, set())
     try:
         raw_news = cached_news_items()
-        all_active_players = build_available_players(metadata, set())
         resolved_news = NewsEntityResolver(all_active_players, identities).resolve_all(raw_news)
         news_facts = tuple(reconcile_facts(extract_facts(resolved_news)))
         news_fetch_succeeded = True
@@ -496,6 +609,30 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
         idempotency_key=f"league-connected:{scope.sleeper_user_id}:{scope.league_id}:{scope.season}",
     )
     has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
+    combined_contexts = {**available_contexts, **contexts}
+    combined_opportunities = {**available_opportunities, **opportunities}
+    combined_profiles = {**available_profiles, **profiles}
+    league_players = tuple(player for player in all_active_players if player.player_id in owned_ids)
+    copilot_state = CopilotState(
+        roster=roster,
+        league=league,
+        contexts=combined_contexts,
+        opportunities=combined_opportunities,
+        profiles=combined_profiles,
+        lineup_slots=tuple(lineup_slots),
+        lineup_decisions=tuple(decisions),
+        waiver_candidates=tuple(waiver_candidates),
+        drop_candidates=tuple(drop_candidates),
+        roster_needs=roster_needs,
+        opportunity_feed=tuple(opportunity_feed),
+        memory=memory,
+        news_facts=tuple(news_result.relevant_facts),
+        matchup_index=matchup_index,
+        identities=identities,
+        league_players=league_players,
+        active_players=tuple(all_active_players),
+        scoring_label=scoring_label(league),
+    )
     view = st.session_state.application_nav
     if view == "Overview":
         if repository and scope and memory:
@@ -516,7 +653,7 @@ def connected_app(leagues: list[dict[str, Any]], nfl_state: NFLState | None) -> 
                     repository.record_analytics(scope, "waiver_recommendation_viewed", event_key=item.event_key, idempotency_key=f"waiver-view:{memory.snapshot_id}:{item.event_key}")
         render_waivers(waiver_candidates, available_opportunities, identities, roster_needs, drop_candidates, has_openai_key, opportunity_feed)
     else:
-        render_ask_fanedge(roster, league, nfl_state, contexts, has_openai_key, opportunity_feed, repository, scope, news_result.relevant_facts)
+        render_ask_fanedge(copilot_state, repository=repository, scope=scope)
 
 
 try:
